@@ -1,7 +1,7 @@
 """
 Support for remote sessions like ssh, docker, podman, virsh
 
-This plugin will look for a child remote sessions inside terminal using the
+This plugin will look for a child remote session inside terminal using the
 psutil API and provide mechanisms to clone session into a new terminal. 
 """
 
@@ -114,11 +114,11 @@ class Remote(plugin.MenuItem):
         err(f"Found remote session {child} for host '{remote_session.GetHost(child)}'")
 
         item = Gtk.MenuItem.new_with_mnemonic('Clone Horizontally')
-        item.connect('activate', self._menu_item_activated, (True, terminal))
+        item.connect('activate', self._menu_item_activated, ('split-horiz', terminal))
         menuitems.append(item)
 
         item = Gtk.MenuItem.new_with_mnemonic('Clone Vertically')
-        item.connect('activate', self._menu_item_activated, (False, terminal))
+        item.connect('activate', self._menu_item_activated, ('split-vert', terminal))
         menuitems.append(item)
 
     def _poll_new_terminals(self, start_time):
@@ -183,12 +183,13 @@ class Remote(plugin.MenuItem):
 
     def _menu_item_activated(self, menuitem, args):
         """
-        callback, args: ( isHoriz, terminal )
+        callback, args: ( signal, terminal )
         """
-        isHoriz, terminal = args
+        signal, terminal = args
 
         ret = self._has_remote_session(terminal.pid)
         if not ret:
+            err("lost remote session seen on context menu?")
             return
         child, remote_type = ret
 
@@ -203,7 +204,6 @@ class Remote(plugin.MenuItem):
                 self._poll_new_terminals,
                 time.time()
             )
-            signal = 'split-horiz' if isHoriz else 'split-vert'
             terminal.emit(signal, terminal.get_cwd())
         else:
             err("already have timer?!")
