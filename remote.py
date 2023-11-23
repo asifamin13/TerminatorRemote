@@ -167,7 +167,7 @@ class Remote(plugin.MenuItem):
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
-        children = psutil.Process(pid).children()
+        children = psutil.Process(pid).children(recursive=True)
         err(f"terminal PID {pid} has children: {children}")
         for child in children:
             with child.oneshot():
