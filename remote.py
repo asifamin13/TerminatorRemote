@@ -2,12 +2,12 @@
 Support for remote sessions like ssh, docker, podman, virsh
 
 This plugin will look for a child remote sessions inside terminal using the
-psutil API and provide mechanisms to clone session into a new terminal
+psutil API and provide mechanisms to clone session into a new terminal. 
 """
 
 import os
 import time
-import re
+import getopt
 import psutil
 
 import gi
@@ -53,11 +53,6 @@ class RemoteSession(object):
 
 class SSHSession(RemoteSession):
     """ SSH sessions """
-
-    # This pattern captures the host directly without the username and ignores options
-    # got from chat GPT
-    ssh_host_regex_pattern = re.compile(r'ssh\s+(?:[^@\s]+\s+)?([^@\s]+)')
-
     def __init__(self, exe='ssh'):
         """ constructor """
         RemoteSession.__init__(self, exe)
@@ -67,17 +62,27 @@ class SSHSession(RemoteSession):
         return self.matches_by_name(proc)
 
     def GetHost(self, proc):
-        """ get host from cmdline """
-        # get full cmdline as str
-        ssh_command = " ".join(proc.cmdline())
+        """ 
+        extract host from ssh command line
+        https://github.com/openssh/openssh-portable/blob/99a2df5e1994cdcb44ba2187b5f34d0e9190be91/ssh.c#L713
+        """
+        def extractHost(target):
+            if '@' in target:
+                return target.split('@')[1]
+            return target
 
-        # Use the pattern to search for the remote host in the SSH command
-        re_match = self.ssh_host_regex_pattern.search(ssh_command)
-
-        # Check if a match is found and return the remote host
-        if re_match:
-            return re_match.group(1)
-
+        shortOpts = (
+            "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+            "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy"
+        )
+        
+        try:
+            ssh_args = proc.cmdline()[1:]
+            opts, args = getopt.getopt(ssh_args, shortOpts)
+            return extractHost(args[0])
+        except Exception as e:
+            err(f"caught error: {e}")
+        
         return None
 
 class Remote(plugin.MenuItem):
