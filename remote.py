@@ -14,6 +14,7 @@ from gi.repository import Gtk, GLib
 
 import terminatorlib.plugin as plugin
 
+from terminatorlib.config import Config
 from terminatorlib.terminator import Terminator
 from terminatorlib.util import err, dbg
 
@@ -30,15 +31,15 @@ class RemoteSession(object):
         """
         self.exe = exe
 
-    def IsType(self, proc):
+    def IsType(self, proc: psutil.Process):
         """ check if psutil.Process matches this type of remote session """
         raise NotImplementedError()
 
-    def GetHost(self, proc):
+    def GetHost(self, proc: psutil.Process):
         """ get remote host target """
         raise NotImplementedError()
 
-    def matches_by_name(self, proc):
+    def matches_by_name(self, proc: psutil.Process):
         """ https://psutil.readthedocs.io/en/latest/#find-process-by-name """
         if self.exe == proc.name():
             return True
@@ -97,12 +98,14 @@ class Remote(plugin.MenuItem):
     def __init__(self):
         """ constructor """
         plugin.MenuItem.__init__(self)
+        self.config = Config().plugin_get_config(self.__class__.__name__)
 
         self.terminator = Terminator()
-
-        self.remote_cmd = None
         self.timeout_id = None
         self.peers = set()
+
+        self.remote_proc = None
+        self.remote_type = None
 
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
@@ -110,7 +113,7 @@ class Remote(plugin.MenuItem):
         if not ret:
             return
         child, remote_session = ret
-        err(f"Found remote session {child} for host '{remote_session.GetHost(child)}'")
+        dbg(f"Found remote session {child} for host '{remote_session.GetHost(child)}'")
 
         item = Gtk.MenuItem.new_with_mnemonic('Clone Horizontally')
         item.connect('activate', self._menu_item_activated, ('split-horiz', terminal))
@@ -163,11 +166,31 @@ class Remote(plugin.MenuItem):
 
     def _spawn_remote_session(self, terminal):
         """ spawn user session into terminal """
-        spawn_cmd = " ".join(self.remote_cmd)
+        remote_cmd = self.remote_proc.cmdline()
+        spawn_cmd = " ".join(remote_cmd)
         cmd = f"{spawn_cmd}{os.linesep}"
         dbg(f"will launch '{cmd}' into new terminal")
         vte = terminal.get_vte()
         vte.feed_child(cmd.encode())
+
+        self._apply_host_settings(terminal)
+
+    def _apply_host_settings(self, terminal):
+        """ setup terminal if host is in config """
+        # check host entry in config
+        remoteHost = self.remote_type.GetHost(self.remote_proc)
+        if not remoteHost:
+            err(f"cannot determine host for proc {self.remote_proc}")
+            return
+
+        if remoteHost not in self.config:
+            dbg(f"no host entry for {remoteHost}")
+            return
+
+        hostSettings = self.config[remoteHost]
+        if 'profile' in hostSettings:
+            print(f"applying profile: {hostSettings['profile']}")
+            terminal.set_profile(None, profile=hostSettings['profile'])
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
@@ -190,19 +213,19 @@ class Remote(plugin.MenuItem):
         if not ret:
             err("lost remote session seen on context menu?")
             return
-        child, _ = ret
-
-        fullArgs = child.cmdline()
-        dbg(f"found remote session: '{fullArgs}'")
-        self.remote_cmd = fullArgs
-
-        if not self.timeout_id:
+        child, remoteType = ret
+        if not self.timeout_id: # check if we are already waiting
+            self.remote_proc = child
+            self.remote_type = remoteType
+            # get list of current terminals, we will watch for a new one
             self.peers = self._get_all_terminals()
             dbg("First peer list: {}".format(self.peers))
+            # launch idle callback to poll for new terminals
             self.timeout_id = GLib.idle_add(
                 self._poll_new_terminals,
                 time.time()
             )
+            # launch new terminal
             terminal.emit(signal, terminal.get_cwd())
         else:
-            err("already have timer?!")
+            err("already waiting for a terminal?")
