@@ -10,10 +10,11 @@ import time
 import getopt
 import psutil
 
+from typing import Optional
+
 from gi.repository import Gtk, GLib
 
-import terminatorlib.plugin as plugin
-
+from terminatorlib.plugin import MenuItem
 from terminatorlib.config import Config
 from terminatorlib.terminator import Terminator
 from terminatorlib.util import err, dbg
@@ -23,7 +24,7 @@ AVAILABLE = ['Remote']
 
 class RemoteSession(object):
     """
-    Base class representing a 'Remote Session'
+    API representing a 'Remote Session'
     """
     def __init__(self, exe):
         """
@@ -31,15 +32,15 @@ class RemoteSession(object):
         """
         self.exe = exe
 
-    def IsType(self, proc: psutil.Process):
+    def IsType(self, proc: psutil.Process) -> bool:
         """ check if psutil.Process matches this type of remote session """
         raise NotImplementedError()
 
-    def GetHost(self, proc: psutil.Process):
+    def GetHost(self, proc: psutil.Process) -> Optional[str]:
         """ get remote host target """
         raise NotImplementedError()
 
-    def matches_by_name(self, proc: psutil.Process):
+    def matches_by_name(self, proc: psutil.Process) -> bool:
         """ https://psutil.readthedocs.io/en/latest/#find-process-by-name """
         if self.exe == proc.name():
             return True
@@ -64,13 +65,14 @@ class SSHSession(RemoteSession):
     def GetHost(self, proc):
         """
         extract host from ssh command line
-        https://github.com/openssh/openssh-portable/blob/99a2df5e1994cdcb44ba2187b5f34d0e9190be91/ssh.c#L713
         """
         def extractHost(target):
             if '@' in target:
                 return target.split('@')[1]
             return target
-
+        # https://github.com/openssh/openssh-portable/blob/99a2df5e1994cdcb44ba2187b5f34d0e9190be91/ssh.c#L713
+        # while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+        #     "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy")) != -1) { /* HUZdhjruz */
         shortOpts = (
             "1246ab:c:e:fgi:kl:m:no:p:qstvx"
             "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy"
@@ -85,7 +87,7 @@ class SSHSession(RemoteSession):
 
         return None
 
-class Remote(plugin.MenuItem):
+class Remote(MenuItem):
     """
     Add remote commands to the terminal menu
     """
@@ -97,15 +99,25 @@ class Remote(plugin.MenuItem):
 
     def __init__(self):
         """ constructor """
-        plugin.MenuItem.__init__(self)
-        self.config = Config().plugin_get_config(self.__class__.__name__)
+        MenuItem.__init__(self)
+        self.config = self._get_config()
+        dbg(f"using config: {self.config}")
 
         self.terminator = Terminator()
         self.timeout_id = None
         self.peers = set()
-
         self.remote_proc = None
         self.remote_type = None
+
+    def _get_config(self):
+        """ return configuration dict, ensure we have proper keys """
+        config = {
+            'ssh_default_profile': 'default'
+        }
+        user_config = Config().plugin_get_config(self.__class__.__name__)
+        if user_config:
+            config.update(user_config)
+        return config
 
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
@@ -113,14 +125,22 @@ class Remote(plugin.MenuItem):
         if not ret:
             return
         child, remote_session = ret
-        dbg(f"Found remote session {child} for host '{remote_session.GetHost(child)}'")
+        dbg(f"Found remote session {child}")
 
         item = Gtk.MenuItem.new_with_mnemonic('Clone Horizontally')
-        item.connect('activate', self._menu_item_activated, ('split-horiz', terminal))
+        item.connect(
+            'activate',
+            self._menu_item_activated,
+            ('split-horiz', terminal)
+        )
         menuitems.append(item)
 
         item = Gtk.MenuItem.new_with_mnemonic('Clone Vertically')
-        item.connect('activate', self._menu_item_activated, ('split-vert', terminal))
+        item.connect(
+            'activate',
+            self._menu_item_activated,
+            ('split-vert', terminal)
+        )
         menuitems.append(item)
 
     def _poll_new_terminals(self, start_time):
@@ -172,30 +192,39 @@ class Remote(plugin.MenuItem):
         dbg(f"will launch '{cmd}' into new terminal")
         vte = terminal.get_vte()
         vte.feed_child(cmd.encode())
-
         self._apply_host_settings(terminal)
+
+    def _get_default_profile(self, remote_type):
+        """
+        get default profile from config
+        maybe more useful in the future...
+        """
+        if isinstance(remote_type, SSHSession):
+            return self.config['ssh_default_profile']
+        return 'default'
 
     def _apply_host_settings(self, terminal):
         """ setup terminal if host is in config """
+        profile = self._get_default_profile(self.remote_type)
         # check host entry in config
         remoteHost = self.remote_type.GetHost(self.remote_proc)
         if not remoteHost:
             err(f"cannot determine host for proc {self.remote_proc}")
-            return
-
-        if remoteHost not in self.config:
+        elif remoteHost not in self.config:
             dbg(f"no host entry for {remoteHost}")
-            return
-
-        hostSettings = self.config[remoteHost]
-        if 'profile' in hostSettings:
-            print(f"applying profile: {hostSettings['profile']}")
-            terminal.set_profile(None, profile=hostSettings['profile'])
+        else:
+            hostSettings = self.config[remoteHost]
+            if 'profile' in hostSettings:
+                profile = hostSettings['profile']
+            else:
+                dbg(f"no profile entry for {remoteHost}")
+        dbg(f"applying profile: {profile}")
+        terminal.set_profile(None, profile=profile)
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
         children = psutil.Process(pid).children(recursive=True)
-        err(f"terminal PID {pid} has children: {children}")
+        dbg(f"terminal PID {pid} has children: {children}")
         for child in children:
             with child.oneshot():
                 for remote_session in self.remote_session_types:
@@ -225,6 +254,7 @@ class Remote(plugin.MenuItem):
                 self._poll_new_terminals,
                 time.time()
             )
+            self._apply_host_settings(terminal)
             # launch new terminal
             terminal.emit(signal, terminal.get_cwd())
         else:
