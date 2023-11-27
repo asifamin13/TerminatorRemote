@@ -2,7 +2,7 @@
 Support for remote sessions like ssh, docker, podman, virsh
 
 This plugin will look for a child remote session inside terminal using the
-psutil API and provide mechanisms to clone session into a new terminal. 
+psutil API and provide mechanisms to clone session into a new terminal.
 """
 
 import os
@@ -10,7 +10,6 @@ import time
 import getopt
 import psutil
 
-import gi
 from gi.repository import Gtk, GLib
 
 import terminatorlib.plugin as plugin
@@ -62,7 +61,7 @@ class SSHSession(RemoteSession):
         return self.matches_by_name(proc)
 
     def GetHost(self, proc):
-        """ 
+        """
         extract host from ssh command line
         https://github.com/openssh/openssh-portable/blob/99a2df5e1994cdcb44ba2187b5f34d0e9190be91/ssh.c#L713
         """
@@ -75,14 +74,14 @@ class SSHSession(RemoteSession):
             "1246ab:c:e:fgi:kl:m:no:p:qstvx"
             "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy"
         )
-        
+
         try:
             ssh_args = proc.cmdline()[1:]
-            opts, args = getopt.getopt(ssh_args, shortOpts)
+            _, args = getopt.getopt(ssh_args, shortOpts)
             return extractHost(args[0])
         except Exception as e:
             err(f"caught error: {e}")
-        
+
         return None
 
 class Remote(plugin.MenuItem):
@@ -181,7 +180,7 @@ class Remote(plugin.MenuItem):
                         return (child, remote_session)
         return None
 
-    def _menu_item_activated(self, menuitem, args):
+    def _menu_item_activated(self, _, args):
         """
         callback, args: ( signal, terminal )
         """
@@ -191,7 +190,7 @@ class Remote(plugin.MenuItem):
         if not ret:
             err("lost remote session seen on context menu?")
             return
-        child, remote_type = ret
+        child, _ = ret
 
         fullArgs = child.cmdline()
         dbg(f"found remote session: '{fullArgs}'")
