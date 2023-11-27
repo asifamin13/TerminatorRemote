@@ -40,8 +40,15 @@ class RemoteSession(object):
         """ get remote host target """
         raise NotImplementedError()
 
+    def Clone(self, proc: psutil.Process) -> str:
+        """ get the command to clone session """
+        raise NotImplementedError()
+
     def matches_by_name(self, proc: psutil.Process) -> bool:
-        """ https://psutil.readthedocs.io/en/latest/#find-process-by-name """
+        """
+        generic check if proc matches self.exe
+        https://psutil.readthedocs.io/en/latest/#find-process-by-name
+        """
         if self.exe == proc.name():
             return True
         if proc.exe():
@@ -87,6 +94,50 @@ class SSHSession(RemoteSession):
 
         return None
 
+    def Clone(self, proc):
+        """ ssh just needs to copy the cmdline """
+        return proc.cmdline()
+
+class ContainerSession(RemoteSession):
+    """ container type sessions """
+    def __init__(self, exe):
+        """ constructor """
+        super().__init__(exe)
+
+    def get_command(self, proc):
+        """ get type of docker command """
+        interactiveCmds = { 'run', 'exec', 'attach' }
+        for arg in proc.cmdline():
+            if arg in interactiveCmds:
+                return arg
+        return None
+
+    def IsType(self, proc):
+        """ check if this is a running docker session """
+        if not self.matches_by_name(proc):
+            return False
+        # make sure this is an interactive run, exec, or attach
+        return self.get_command() != None
+
+    def GetHost(self, proc):
+        """ try to find container name from cmdline """
+        # TODO: figure this out
+        cmd = self.get_command(proc)
+        if not cmd:
+            return None
+        if cmd == "run":
+            # this is a docker run, check for --name
+            try:
+                idxOfName = proc.cmdline().index("--name")
+                return proc.cmdline()[idxOfName + 1]
+            except ValueError as e:
+                err("caught error '{e}'")
+        return None
+
+    def Clone(self, proc):
+        """ get cmd to launch terminal into container session """
+        return proc.cmdline() # TODO: this should be an exec -it
+
 class Remote(MenuItem):
     """
     Add remote commands to the terminal menu
@@ -94,7 +145,9 @@ class Remote(MenuItem):
     capabilities = ['terminal_menu']
 
     remote_session_types = [
-        SSHSession()
+        SSHSession(),
+        ContainerSession('docker'),
+        ContainerSession('podman')
     ]
 
     def __init__(self):
@@ -112,7 +165,8 @@ class Remote(MenuItem):
     def _get_config(self):
         """ return configuration dict, ensure we have proper keys """
         config = {
-            'ssh_default_profile': 'default'
+            'ssh_default_profile': 'default',
+            'container_default_profile': 'default'
         }
         user_config = Config().plugin_get_config(self.__class__.__name__)
         if user_config:
@@ -186,7 +240,7 @@ class Remote(MenuItem):
 
     def _spawn_remote_session(self, terminal):
         """ spawn user session into terminal """
-        remote_cmd = self.remote_proc.cmdline()
+        remote_cmd = self.remote_type.Clone(self.remote_proc)
         spawn_cmd = " ".join(remote_cmd)
         cmd = f"{spawn_cmd}{os.linesep}"
         dbg(f"will launch '{cmd}' into new terminal")
@@ -201,6 +255,8 @@ class Remote(MenuItem):
         """
         if isinstance(remote_type, SSHSession):
             return self.config['ssh_default_profile']
+        if isinstance(remote_type, ContainerSession):
+            return self.config['container_default_profile']
         return 'default'
 
     def _apply_host_settings(self, terminal):
