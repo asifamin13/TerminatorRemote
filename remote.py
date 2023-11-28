@@ -8,9 +8,10 @@ psutil API and provide mechanisms to clone session into a new terminal.
 import os
 import time
 import getopt
+import argparse
 import psutil
 
-from typing import Optional
+from typing import Optional, List
 
 from gi.repository import Gtk, GLib
 
@@ -40,7 +41,7 @@ class RemoteSession(object):
         """ get remote host target """
         raise NotImplementedError()
 
-    def Clone(self, proc: psutil.Process) -> str:
+    def Clone(self, proc: psutil.Process) -> List[str]:
         """ get the command to clone session """
         raise NotImplementedError()
 
@@ -104,39 +105,146 @@ class ContainerSession(RemoteSession):
         """ constructor """
         super().__init__(exe)
 
-    def get_command(self, proc):
-        """ get type of docker command """
+    def IsType(self, proc):
+        """ check if this is a running docker session """
+        if not self.matches_by_name(proc):
+            return False
+        dbg(f"checking cmdline: {proc.cmdline()}")
+        # make sure this is an interactive run, exec, or attach
+        return self._get_command(proc) != None
+
+    def GetHost(self, proc):
+        """ try to find container name from cmdline """
+        # TODO: figure this out
+        cmd = self._get_command(proc)
+        if not cmd:
+            return None
+        try:
+            if cmd == "run":
+                return self._get_host_run(proc)
+            elif cmd == "exec":
+                return self._get_host_exec(proc)
+            elif cmd == "attach":
+                return self._get_host_attach(proc)
+            err("unrecognized sub command?")
+        except Exception as e:
+            err(f"caught exception {e}")
+        return None
+
+    def Clone(self, proc):
+        """ get cmd to launch terminal into container session """
+        cmd = self._get_command(proc)
+        if not cmd:
+            err("shouldnt happen?")
+            return proc.cmdline()
+        if cmd in ["exec" , "attach"]:
+            return proc.cmdline()
+        # this is a docker run
+        host = self.GetHost(proc)
+        if not host:
+            # we dont have host info
+            # just make new container
+            return proc.cmdline()
+        else:
+            # we should exec a terminal session here
+            return [ self.exe, 'exec', '-it', host, 'sh' ]
+
+    def _get_command(self, proc):
+        """ get type of container command, we only support interactive ones """
         interactiveCmds = { 'run', 'exec', 'attach' }
         for arg in proc.cmdline():
             if arg in interactiveCmds:
                 return arg
         return None
 
-    def IsType(self, proc):
-        """ check if this is a running docker session """
-        if not self.matches_by_name(proc):
-            return False
-        # make sure this is an interactive run, exec, or attach
-        return self.get_command() != None
-
-    def GetHost(self, proc):
-        """ try to find container name from cmdline """
-        # TODO: figure this out
-        cmd = self.get_command(proc)
-        if not cmd:
-            return None
-        if cmd == "run":
-            # this is a docker run, check for --name
-            try:
-                idxOfName = proc.cmdline().index("--name")
-                return proc.cmdline()[idxOfName + 1]
-            except ValueError as e:
-                err("caught error '{e}'")
+    def _get_host_run(self, proc):
+        """
+        docker run, just check for --name
+        If we dont have name (it would be random), give up.
+        I'd have to parse docker ps / inspect or use the
+        API which is a bit beyond the scope of this
+        """
+        try:
+            idxOfName = proc.cmdline().index("--name")
+            name = proc.cmdline()[idxOfName + 1]
+            dbg(f"parsed container name: {name}")
+            return name
+        except Exception as e:
+            err("caught error '{e}'")
         return None
 
-    def Clone(self, proc):
-        """ get cmd to launch terminal into container session """
-        return proc.cmdline() # TODO: this should be an exec -it
+    def _get_host_exec(self, proc):
+        """
+        get container name from docker exec cmdline
+        FORMAT: podman exec [options] CONTAINER [COMMAND [ARG...]]
+        Options:
+            -d, --detach               Run the exec session in detached mode (backgrounded)
+                --detach-keys string   Select the key sequence for detaching a container. Format is a single character [a-Z] or ctrl-<value> where <value> is one of: a-z, @, ^, [, , or _ (default "ctrl-p,ctrl-q")
+            -e, --env stringArray      Set environment variables
+                --env-file strings     Read in a file of environment variables
+            -i, --interactive          Keep STDIN open even if not attached
+            -l, --latest               Act on the latest container podman is aware of
+                                        Not supported with the "--remote" flag
+                --preserve-fds uint    Pass N additional file descriptors to the container
+                --privileged           Give the process extended Linux capabilities inside the container.  The default is false
+            -t, --tty                  Allocate a pseudo-TTY. The default is false
+            -u, --user string          Sets the username or UID used and optionally the groupname or GID for the specified command
+            -w, --workdir string       Working directory inside the container
+        """
+        fullArgs = proc.cmdline()
+        startIndex = fullArgs.index('exec') + 1
+        parser = argparse.ArgumentParser()
+        parser.add_argument("container")
+        parser.add_argument("command", nargs='?')
+        parser.add_argument('-d', '--detach', action='store_true')
+        parser.add_argument('--detach-keys')
+        parser.add_argument('-e', '--env')
+        parser.add_argument('--env-file')
+        parser.add_argument('-i', '--interactive', action='store_true')
+        parser.add_argument('-l', '--latest', action='store_true')
+        parser.add_argument('--privileged')
+        parser.add_argument('--preserve-fds')
+        parser.add_argument('-t', '--tty', action='store_true')
+        parser.add_argument('-u', '--user')
+        parser.add_argument('-w', '--workdir')
+        args, unknown = parser.parse_known_args(fullArgs[startIndex:])
+        dbg(f"got args: {args}, unknown: {unknown}")
+        return args.container
+
+    def _get_host_attach(self, proc):
+        """
+        get container name from docker attach
+        FORMAT: podman attach [options] container
+        OPTIONS
+            --detach-keys=sequence
+                Specify the key sequence for detaching a container. Format is a single character [a-Z] or one or more ctrl-<value> characters where <value> is one of: a-z, @, ^, [, , or _.
+                Specifying "" disables this feature. The default is ctrl-p,ctrl-q.
+
+                This option can also be set in containers.conf(5) file.
+
+            --latest, -l
+                Instead  of  providing  the  container  name or ID, use the last created container.  Note: the last started container can be from other users of Podman on the host machine.
+                (This option is not available with the remote Podman client, including Mac and Windows (excluding WSL2) machines)
+
+            --no-stdin
+                Do not attach STDIN. The default is false.
+
+            --sig-proxy
+                Proxy received signals to the container process (non-TTY mode only). SIGCHLD, SIGSTOP, and SIGKILL are not proxied.
+
+                The default is true.
+        """
+        fullArgs = proc.cmdline()
+        startIndex = fullArgs.index('attach') + 1
+        parser = argparse.ArgumentParser()
+        parser.add_argument("container")
+        parser.add_argument('--detach-keys')
+        parser.add_argument('-l', '--latest', action='store_true')
+        parser.add_argument('--no-stdin', action='store_false')
+        parser.add_argument('--sig-proxy', action='store_true')
+        args, unknown = parser.parse_known_args(fullArgs[startIndex:])
+        dbg(f"got args: {args}, unknown: {unknown}")
+        return args.container
 
 class Remote(MenuItem):
     """
@@ -241,8 +349,8 @@ class Remote(MenuItem):
     def _spawn_remote_session(self, terminal):
         """ spawn user session into terminal """
         remote_cmd = self.remote_type.Clone(self.remote_proc)
-        spawn_cmd = " ".join(remote_cmd)
-        cmd = f"{spawn_cmd}{os.linesep}"
+        spawn_cmd = " ".join(remote_cmd) # get as full string, not list of strings
+        cmd = f"{spawn_cmd}{os.linesep}" # make sure we press "enter"
         dbg(f"will launch '{cmd}' into new terminal")
         vte = terminal.get_vte()
         vte.feed_child(cmd.encode())
