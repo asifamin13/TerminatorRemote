@@ -1,8 +1,26 @@
 """
-Support for remote sessions like ssh, docker, podman, virsh
+NAME
+    remote.py - Add support for remote sessions like ssh and docker/podman
 
-This plugin will look for a child remote session inside terminal using the
-psutil API and provide mechanisms to clone session into a new terminal.
+DESCRIPTION
+    This plugin will look for a child remote session inside terminal using the
+    psutil API and provide mechanisms to clone session into a new terminal and 
+    change profiles based on the remote type or host.
+
+    Cloning sessions inspired from https://github.com/ilgarm/terminator_plugins
+      * Not maintained anymore
+    
+    Host profile matching inspired from https://github.com/ilgarm/terminator_plugins
+      * This finds hosts by parsing the PS1 using a regex
+
+INSTALLATION
+    Put this file in ~/.config/terminator/plugins/
+
+CONFIGURATION
+    TODO
+
+AUTHORS
+    The plugin was developed by Asif Amin <asifamin@utexas.edu>
 """
 
 import os
@@ -20,7 +38,6 @@ from terminatorlib.config import Config
 from terminatorlib.terminator import Terminator
 from terminatorlib.util import err, dbg
 
-# Every plugin you want Terminator to load *must* be listed in 'AVAILABLE'
 AVAILABLE = ['Remote']
 
 class RemoteSession(object):
