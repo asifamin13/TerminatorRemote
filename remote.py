@@ -5,7 +5,7 @@ NAME
 DESCRIPTION
     This plugin will look for a child remote session inside terminal using the
     psutil API and provide mechanisms in the context menu to clone session into
-    a new terminal and change profiles based on the remote type or host.
+    a new terminal and/or change profiles based on the remote type or host.
 
     Cloning sessions inspired from https://github.com/ilgarm/terminator_plugins
       * Not maintained anymore
@@ -40,6 +40,15 @@ CONFIGURATION
           profile = foo_profile
         [[[bar]]]
           profile = bar_profile
+
+DEBUGGING
+    To debug, start Terminator from another terminal emulator like so:
+
+    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession
+
+DEVELOPMENT
+    support for future types of "Remote Sessions" can be easily added by
+    subclassing `RemoteSession` and appending an instance to `Remote.remote_session_types`
 
 AUTHORS
     The plugin was developed by Asif Amin <asifamin@utexas.edu>

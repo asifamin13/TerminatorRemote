@@ -43,3 +43,16 @@ Plugin section in `~/.config/terminator/config` :
     [[[foo]]]
       profile = foo_profile
 ```
+
+## Debugging
+
+To debug, start Terminator from another terminal emulator like so:
+
+```shell
+terminator -d --debug-classes Remote,SSHSession,ContainerSession
+```
+
+## Development
+
+Adding support for future types of "Remote Sessions" can be easily added by
+subclassing `RemoteSession` and appending an instance to `Remote.remote_session_types`
