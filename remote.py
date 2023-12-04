@@ -290,8 +290,8 @@ class Remote(MenuItem):
     def _get_config(self):
         """ return configuration dict, ensure we have proper keys """
         config = {
-            'ssh_default_profile': 'default',
-            'container_default_profile': 'default'
+            'ssh_default_profile': "",
+            'container_default_profile': ""
         }
         user_config = Config().plugin_get_config(self.__class__.__name__)
         if user_config:
@@ -382,11 +382,14 @@ class Remote(MenuItem):
             return self.config['ssh_default_profile']
         if isinstance(remote_type, ContainerSession):
             return self.config['container_default_profile']
-        return 'default'
+        return ''
 
     def _apply_host_settings(self, terminal):
         """ setup terminal if host is in config """
         profile = self._get_default_profile(self.remote_type)
+        if not profile:
+            dbg("no default profile specified in config")
+            return
         # check host entry in config
         remoteHost = self.remote_type.GetHost(self.remote_proc)
         if not remoteHost:
