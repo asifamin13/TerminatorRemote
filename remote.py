@@ -68,6 +68,7 @@ from terminatorlib.plugin import MenuItem
 from terminatorlib.config import Config
 from terminatorlib.terminator import Terminator
 from terminatorlib.util import err, dbg
+from terminatorlib.translation import _
 
 from terminatorlib.version import APP_NAME, APP_VERSION
 
@@ -361,7 +362,7 @@ class Remote(MenuItem):
 
         # if we have split-auto signal
         if APP_VERSION >= '2.1.3':
-            item = Gtk.MenuItem.new_with_mnemonic('Clone Auto')
+            item = Gtk.MenuItem.new_with_mnemonic(_('Clone Auto'))
             item.connect(
                 'activate',
                 self._menu_item_activated,
@@ -370,7 +371,7 @@ class Remote(MenuItem):
             menuitems.append(item)
 
         # normal split buttons
-        item = get_image_menuitem('Clone Horizontally', horiz=True)
+        item = get_image_menuitem(_('Clone Horizontally'), horiz=True)
         item.connect(
             'activate',
             self._menu_item_activated,
@@ -378,7 +379,7 @@ class Remote(MenuItem):
         )
         menuitems.append(item)
 
-        item = get_image_menuitem('Clone Vertically', horiz=False)
+        item = get_image_menuitem(_('Clone Vertically'), horiz=False)
         item.connect(
             'activate',
             self._menu_item_activated,
