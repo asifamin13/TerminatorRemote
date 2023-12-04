@@ -4,20 +4,41 @@ NAME
 
 DESCRIPTION
     This plugin will look for a child remote session inside terminal using the
-    psutil API and provide mechanisms to clone session into a new terminal and 
+    psutil API and provide mechanisms to clone session into a new terminal and
     change profiles based on the remote type or host.
 
     Cloning sessions inspired from https://github.com/ilgarm/terminator_plugins
       * Not maintained anymore
-    
-    Host profile matching inspired from https://github.com/ilgarm/terminator_plugins
+
+    Host profile matching inspired from https://github.com/GratefulTony/TerminatorHostWatch
       * This finds hosts by parsing the PS1 using a regex
 
 INSTALLATION
     Put this file in ~/.config/terminator/plugins/
 
 CONFIGURATION
-    TODO
+    Plugin section in ~/.config/terminator/config
+    [plugins]
+      [[Remote]]
+
+    Configuration keys:
+      * ssh_default_profile: optional profile to apply to all SSH sessions
+      * container_default_profile: optional profile to apply to all container sessions
+
+    Host section:
+      You can add host sections with a 'profile' key which will override the defaults
+
+    ex)
+
+    [plugins]
+      [[Remote]]
+        ssh_default_profile = common_ssh_profile
+        container_default_profile = common_docker_profile
+        [[[foo]]]
+          profile = foo_profile
+        [[[bar]]]
+          profile = bar_profile
+
 
 AUTHORS
     The plugin was developed by Asif Amin <asifamin@utexas.edu>
@@ -389,7 +410,6 @@ class Remote(MenuItem):
         profile = self._get_default_profile(self.remote_type)
         if not profile:
             dbg("no default profile specified in config")
-            return
         # check host entry in config
         remoteHost = self.remote_type.GetHost(self.remote_proc)
         if not remoteHost:
@@ -402,6 +422,9 @@ class Remote(MenuItem):
                 profile = hostSettings['profile']
             else:
                 dbg(f"no profile entry for {remoteHost}")
+        if not profile:
+            dbg("cant find a profile in config")
+            return
         dbg(f"applying profile: {profile}")
         terminal.set_profile(None, profile=profile)
 
