@@ -59,6 +59,8 @@ from terminatorlib.config import Config
 from terminatorlib.terminator import Terminator
 from terminatorlib.util import err, dbg
 
+from terminatorlib.version import APP_NAME, APP_VERSION
+
 AVAILABLE = ['Remote']
 
 class RemoteSession(object):
@@ -327,7 +329,30 @@ class Remote(MenuItem):
         child, remote_session = ret
         dbg(f"Found remote session {child}")
 
-        item = Gtk.MenuItem.new_with_mnemonic('Clone Horizontally')
+        def get_image_menuitem(title, horiz):
+            item = Gtk.ImageMenuItem.new_with_mnemonic(title)
+            image = Gtk.Image()
+            image.set_from_icon_name(
+                "{}_{}".format(APP_NAME, "horiz" if horiz else "vert"),
+                Gtk.IconSize.MENU
+            )
+            item.set_image(image)
+            if hasattr(item, 'set_always_show_image'):
+                item.set_always_show_image(True)
+            return item
+
+        # if we have split-auto signal
+        if APP_VERSION >= '2.1.3':
+            item = Gtk.MenuItem.new_with_mnemonic('Clone Auto')
+            item.connect(
+                'activate',
+                self._menu_item_activated,
+                ('split-auto', terminal)
+            )
+            menuitems.append(item)
+
+        # normal split buttons
+        item = get_image_menuitem('Clone Horizontally', horiz=True)
         item.connect(
             'activate',
             self._menu_item_activated,
@@ -335,7 +360,7 @@ class Remote(MenuItem):
         )
         menuitems.append(item)
 
-        item = Gtk.MenuItem.new_with_mnemonic('Clone Vertically')
+        item = get_image_menuitem('Clone Vertically', horiz=False)
         item.connect(
             'activate',
             self._menu_item_activated,
