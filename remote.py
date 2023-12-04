@@ -4,8 +4,8 @@ NAME
 
 DESCRIPTION
     This plugin will look for a child remote session inside terminal using the
-    psutil API and provide mechanisms to clone session into a new terminal and
-    change profiles based on the remote type or host.
+    psutil API and provide mechanisms in the context menu to clone session into
+    a new terminal and change profiles based on the remote type or host.
 
     Cloning sessions inspired from https://github.com/ilgarm/terminator_plugins
       * Not maintained anymore
@@ -22,6 +22,7 @@ CONFIGURATION
       [[Remote]]
 
     Configuration keys:
+      * auto_clone: Clone automatically when you split a remote session
       * ssh_default_profile: optional profile to apply to all SSH sessions
       * container_default_profile: optional profile to apply to all container sessions
 
@@ -34,11 +35,11 @@ CONFIGURATION
       [[Remote]]
         ssh_default_profile = common_ssh_profile
         container_default_profile = common_docker_profile
+        auto_clone = False
         [[[foo]]]
           profile = foo_profile
         [[[bar]]]
           profile = bar_profile
-
 
 AUTHORS
     The plugin was developed by Asif Amin <asifamin@utexas.edu>
@@ -314,11 +315,19 @@ class Remote(MenuItem):
         """ return configuration dict, ensure we have proper keys """
         config = {
             'ssh_default_profile': "",
-            'container_default_profile': ""
+            'container_default_profile': "",
+            'auto_clone': "False"
         }
         user_config = Config().plugin_get_config(self.__class__.__name__)
+        dbg(f"read user config: {user_config}")
         if user_config:
             config.update(user_config)
+        # I want auto_clone as a bool
+        try:
+            config['auto_clone'] = config['auto_clone'].lower() == 'true'
+        except Exception as e:
+            err(f"problem parsing auto_clone: {e}")
+            config['auto_clone'] = False
         return config
 
     def callback(self, menuitems, menu, terminal):
@@ -367,6 +376,16 @@ class Remote(MenuItem):
             ('split-vert', terminal)
         )
         menuitems.append(item)
+
+        # find the split items and add our clone handlers when they finish
+        if self.config['auto_clone']:
+            self.peers = self._get_all_terminals()
+            for child in menu.get_children():
+                if 'Split' in child.get_label():
+                    dbg(f"handling split on menu item '{child.get_label()}'")
+                    child.connect_after(
+                        'activate', self._split_axis, terminal
+                    )
 
     def _poll_new_terminals(self, start_time):
         """
@@ -464,9 +483,39 @@ class Remote(MenuItem):
                         return (child, remote_session)
         return None
 
+    def _split_axis(self, widget, terminal):
+        """ handle upstream split command, called AFTER default handler """
+        dbg(f"handling split on terminal {terminal}!")
+        # make sure original terminal still has remote session
+        ret = self._has_remote_session(terminal.pid)
+        if not ret:
+            err("lost remote session seen on context menu?")
+            return
+        self.remote_proc, self.remote_type = ret
+        self._apply_host_settings(terminal)
+
+        # original split command should have finished due to our
+        # connect_after. Try to find the new terminal since we
+        # last activated the context menu.
+        currPeers = self._get_all_terminals()
+        if len(currPeers) != len(self.peers):
+            # parent container changed, get the added child
+            newPeers = [ x for x in currPeers if x not in self.peers ]
+            if not len(newPeers):
+                err("container removed children?!")
+                return False
+            dbg(f"Container has new children: {newPeers}")
+            if len(newPeers) != 1:
+                err("container has more than one child?!")
+            newTermUUID = newPeers[0]
+            newTerminal = self.terminator.find_terminal_by_uuid(newTermUUID.urn)
+            self._spawn_remote_session(newTerminal)
+        else:
+            err("cant figure out the new terminal?")
+
     def _menu_item_activated(self, _, args):
         """
-        callback, args: ( signal, terminal )
+        clone callback, args: ( signal, terminal )
         """
         signal, terminal = args
 

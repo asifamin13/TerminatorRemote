@@ -29,6 +29,9 @@ Plugin section in `~/.config/terminator/config` :
 ```
 [plugins]
   [[Remote]]
+    # Automatically clone when you split a terminal with a remote session
+    auto_clone = True
+
     # Optional default profile for all SSH sessions
     ssh_default_profile = common_ssh_profile
 
