@@ -58,6 +58,7 @@ import os
 import time
 import getopt
 import argparse
+import re
 import psutil
 
 from typing import Optional, List
@@ -309,6 +310,13 @@ class Remote(MenuItem):
         ContainerSession('podman')
     ]
 
+    # I hate using regex, got this from ChatGPT 3.5
+    # This should try to match a sane linux file path that can
+    # have alphanumeric characters, ~, underscores, hyphens, and dots
+    cwd_regex = re.compile(
+        r'(\/(?:[\w.-]+\/)*[\w.-]+|\~(?:\/[\w.-]+)*)+(?:\.\w+)?'
+    )
+
     def __init__(self):
         """ constructor """
         MenuItem.__init__(self)
@@ -318,26 +326,55 @@ class Remote(MenuItem):
         self.terminator = Terminator()
         self.timeout_id = None
         self.peers = set()
+
         self.remote_proc = None
         self.remote_type = None
+        self.remote_cwd = None
+
+    def _get_cwd_from_lines(self, terminal, N=5):
+        """
+        get last N lines in terminal and try to infer the CWD
+        by finding the last sane linux file path. This assumes there
+        is a PS1 which outputs the working directory
+        """
+        vte = terminal.get_vte()
+        currCol, currRow = vte.get_cursor_position()
+        lines = vte.get_text_range(
+            start_row=max(0, currRow - N),
+            start_col=0,
+            end_row=currRow,
+            end_col=currCol
+        )[0]
+        matches = list(self.cwd_regex.finditer(lines))
+        if matches:
+            lastMatch = matches[-1]
+            dbg(f"Inferred remote cwd: {lastMatch.group()}")
+            return lastMatch.group()
+        dbg(f"cant find remote cwd in '{lines}'")
+        return None
 
     def _get_config(self):
         """ return configuration dict, ensure we have proper keys """
         config = {
             'ssh_default_profile': "",
             'container_default_profile': "",
-            'auto_clone': "False"
+            'auto_clone': "False",
+            'infer_cwd': "True"
         }
         user_config = Config().plugin_get_config(self.__class__.__name__)
         dbg(f"read user config: {user_config}")
         if user_config:
             config.update(user_config)
-        # I want auto_clone as a bool
-        try:
-            config['auto_clone'] = config['auto_clone'].lower() == 'true'
-        except Exception as e:
-            err(f"problem parsing auto_clone: {e}")
-            config['auto_clone'] = False
+
+        def get_as_bool(config, key):
+            try:
+                config[key] = config[key].lower() == 'true'
+            except Exception as e:
+                err(f"problem parsing {key} as bool: {e}")
+                config[key] = False
+
+        get_as_bool(config, 'auto_clone')
+        get_as_bool(config, 'infer_cwd')
         return config
 
     def callback(self, menuitems, menu, terminal):
@@ -443,6 +480,8 @@ class Remote(MenuItem):
         remote_cmd = self.remote_type.Clone(self.remote_proc)
         spawn_cmd = " ".join(remote_cmd) # get as full string, not list of strings
         cmd = f"{spawn_cmd}{os.linesep}" # make sure we press "enter"
+        if self.remote_cwd:
+            cmd += f"cd {self.remote_cwd}{os.linesep}"
         dbg(f"will launch '{cmd}' into new terminal")
         vte = terminal.get_vte()
         vte.feed_child(cmd.encode())
@@ -502,6 +541,8 @@ class Remote(MenuItem):
             err("lost remote session seen on context menu?")
             return
         self.remote_proc, self.remote_type = ret
+        if self.config['infer_cwd']:
+            self.remote_cwd = self._get_cwd_from_lines(terminal)
         self._apply_host_settings(terminal)
 
         # original split command should have finished due to our
@@ -537,6 +578,8 @@ class Remote(MenuItem):
         if not self.timeout_id: # check if we are already waiting
             self.remote_proc = child
             self.remote_type = remoteType
+            if self.config['infer_cwd']:
+                self.remote_cwd = self._get_cwd_from_lines(terminal)
             # get list of current terminals, we will watch for a new one
             self.peers = self._get_all_terminals()
             dbg("First peer list: {}".format(self.peers))
