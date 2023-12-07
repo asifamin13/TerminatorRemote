@@ -23,6 +23,7 @@ CONFIGURATION
 
     Configuration keys:
       * auto_clone: Clone automatically when you split a remote session
+      * infer_cwd: When a session is cloned, attempt to `cd` into working directory
       * ssh_default_profile: optional profile to apply to all SSH sessions
       * container_default_profile: optional profile to apply to all container sessions
 

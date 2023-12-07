@@ -30,7 +30,11 @@ Plugin section in `~/.config/terminator/config` :
 [plugins]
   [[Remote]]
     # Automatically clone when you split a terminal with a remote session
-    auto_clone = True
+    auto_clone = False
+
+    # When a terminal with a remote session is cloned, attempt to parse the
+    # current working directory via the PS1 and 'cd' into it
+    infer_cwd = True
 
     # Optional default profile for all SSH sessions
     ssh_default_profile = common_ssh_profile
