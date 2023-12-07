@@ -310,6 +310,9 @@ class Remote(MenuItem):
         ContainerSession('podman')
     ]
 
+    # global plugin config
+    config = None
+
     # I hate using regex, got this from ChatGPT 3.5
     # This should try to match a sane linux file path that can
     # have alphanumeric characters, ~, underscores, hyphens, and dots
@@ -320,8 +323,10 @@ class Remote(MenuItem):
     def __init__(self):
         """ constructor """
         MenuItem.__init__(self)
-        self.config = self._get_config()
-        dbg(f"using config: {self.config}")
+
+        if not Remote.config:
+            Remote.config = Remote.get_config()
+            dbg(f"using config: {self.config}")
 
         self.terminator = Terminator()
         self.timeout_id = None
@@ -330,6 +335,31 @@ class Remote(MenuItem):
         self.remote_proc = None
         self.remote_type = None
         self.remote_cwd = None
+
+    @classmethod
+    def get_config(cls):
+        """ return configuration dict, ensure we have proper keys """
+        config = {
+            'ssh_default_profile': "",
+            'container_default_profile': "",
+            'auto_clone': "False",
+            'infer_cwd': "True"
+        }
+        user_config = Config().plugin_get_config(cls.__name__)
+        dbg(f"read user config: {user_config}")
+        if user_config:
+            config.update(user_config)
+
+        def get_as_bool(config, key):
+            try:
+                config[key] = config[key].lower() == 'true'
+            except Exception as e:
+                err(f"problem parsing {key} as bool: {e}")
+                config[key] = False
+
+        get_as_bool(config, 'auto_clone')
+        get_as_bool(config, 'infer_cwd')
+        return config
 
     def _get_cwd_from_lines(self, terminal, N=5):
         """
@@ -352,30 +382,6 @@ class Remote(MenuItem):
             return lastMatch.group()
         dbg(f"cant find remote cwd in '{lines}'")
         return None
-
-    def _get_config(self):
-        """ return configuration dict, ensure we have proper keys """
-        config = {
-            'ssh_default_profile': "",
-            'container_default_profile': "",
-            'auto_clone': "False",
-            'infer_cwd': "True"
-        }
-        user_config = Config().plugin_get_config(self.__class__.__name__)
-        dbg(f"read user config: {user_config}")
-        if user_config:
-            config.update(user_config)
-
-        def get_as_bool(config, key):
-            try:
-                config[key] = config[key].lower() == 'true'
-            except Exception as e:
-                err(f"problem parsing {key} as bool: {e}")
-                config[key] = False
-
-        get_as_bool(config, 'auto_clone')
-        get_as_bool(config, 'infer_cwd')
-        return config
 
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
@@ -424,6 +430,16 @@ class Remote(MenuItem):
         )
         menuitems.append(item)
 
+        # add option to clone on split
+        item = Gtk.CheckMenuItem(_('Clone On Split'))
+        item.set_active(self.config['auto_clone'])
+        item.connect(
+            'toggled',
+            self._on_clone_on_split,
+            None
+        )
+        menuitems.append(item)
+
         # find the split items and add our clone handlers when they finish
         if self.config['auto_clone']:
             self.peers = self._get_all_terminals()
@@ -433,6 +449,10 @@ class Remote(MenuItem):
                     child.connect_after(
                         'activate', self._split_axis, terminal
                     )
+
+    def _on_clone_on_split(self, widget, data):
+        """ handle check text box """
+        self.config['auto_clone'] = widget.get_active()
 
     def _poll_new_terminals(self, start_time):
         """
