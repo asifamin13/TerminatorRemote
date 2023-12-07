@@ -1,6 +1,6 @@
 # TerminatorRemote
 
-A Terminator plugin which adds features for ssh and docker/podman
+A Terminator plugin which adds features for ssh and docker/podman to the context menu
 
 ## Clone Horizontally/Vertically
 
