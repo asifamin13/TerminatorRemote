@@ -362,7 +362,7 @@ class Remote(MenuItem):
         get_as_bool(config, 'infer_cwd')
         return config
 
-    def _get_cwd_from_lines(self, terminal, N=5):
+    def _get_cwd_from_lines(self, terminal, N=3):
         """
         get last N lines in terminal and try to infer the CWD
         by finding the last sane linux file path. This assumes there
