@@ -2,6 +2,8 @@
 
 A Terminator plugin which adds features for ssh and docker/podman to the context menu
 
+![Alt Text](https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExejdidWNqYXh3dXc1bWNvcjJteXRkOTVsM24wNWQ0dzk4dnRydGJldSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/fNB06vpKpYIDDewFFS/source.gif)
+
 ## Clone Horizontally/Vertically
 
 This will clone your current SSH/container session into a newly spawned terminal
