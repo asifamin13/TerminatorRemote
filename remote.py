@@ -60,6 +60,8 @@ import time
 import getopt
 import argparse
 import re
+import threading
+import asyncio
 import psutil
 
 from typing import Optional, List
@@ -299,6 +301,75 @@ class ContainerSession(RemoteSession):
         dbg(f"got args: {args}, unknown: {unknown}")
         return args.container
 
+class RemoteProcWatch(object):
+    """ 
+    cache current remote sessions in background away from the GTK loop
+    """
+    def __init__(self, session_types, poll_rate=1.0) -> None:
+        """ constructor """
+        self.remote_session_types = session_types
+        self.poll_rate = poll_rate
+        self.quit = False
+
+        self.watches = dict() # pid -> None or (psutil.Process, RemoteSession)
+
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._external_thread)
+
+    def _has_remote_session(self, pid):
+        """ check if this PID has a direct child with remote session """
+        children = psutil.Process(pid).children(recursive=True)
+        dbg(f"terminal PID {pid} has children: {children}")
+        for child in children:
+            with child.oneshot():
+                for remote_session in self.remote_session_types:
+                    if remote_session.IsType(child):
+                        return (child, remote_session)
+        return None
+
+    def Register(self, pid):
+        """ watch PID for children """
+        if pid in self.watches:
+            return
+        dbg(f"adding new pid {pid}")
+        self.watches[pid] = None
+        # start poll thread if not yet started
+        if not self.thread.is_alive():
+            self.thread.start()
+
+    def GetPIDProcInfo(self, pid):
+        """ get current remote proc info """
+        if pid not in self.watches:
+            return None
+        return self.watches[pid]
+
+    async def _poll(self):
+        """ check psutil proc info """
+        while not self.quit:
+            print(f"polling {len(self.watches)} procs...")
+            for procPid in list(self.watches.keys()):
+                try:
+                    ret = self._has_remote_session(procPid)
+                    self.watches[procPid] = ret
+                except psutil.NoSuchProcess as e:
+                    # pid has gone away
+                    del self.watches[procPid]
+            # this happens when we are exiting
+            if len(self.watches) == 0:
+                print("raising quit flag!")
+                self.quit = True
+            await asyncio.sleep(self.poll_rate)
+
+    async def _async_main(self):
+        """ async stuff """
+        task = self.loop.create_task(self._poll())
+        await task
+
+    def _external_thread(self):
+        """ external event loop """
+        self.loop.run_until_complete(self._async_main())
+        self.loop.close()
+
 class Remote(MenuItem):
     """
     Add remote commands to the terminal menu
@@ -330,12 +401,44 @@ class Remote(MenuItem):
             dbg(f"using config: {self.config}")
 
         self.terminator = Terminator()
-        self.timeout_id = None
-        self.peers = set()
 
+        # current terminal instance data
+        # from context menu
+        self.peers = set()
         self.remote_proc = None
         self.remote_type = None
         self.remote_cwd = None
+
+        # timer callbacks
+        self.timeout_id = None
+        self.watch_id = GLib.timeout_add(
+            1.0 * 1000,
+            self._update_watches,
+            None
+        )
+
+        # Proc watch poller
+        self.remote_proc_watch = RemoteProcWatch(self.remote_session_types)
+
+    def _update_watches(self, _):
+        """
+        Watch for new terminals in background
+        """
+        currRemoteTerminals = set()
+        for terminal in self.terminator.terminals:
+            self.remote_proc_watch.Register(terminal.pid)
+            ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
+            if ret:
+                child, remoteType = ret
+                if terminal not in currRemoteTerminals:
+                    print(f"found remote session {child} of type {remoteType}!")
+                    self._apply_host_settings(
+                        terminal=terminal, 
+                        proc=child, 
+                        proc_type=remoteType
+                    )
+                    currRemoteTerminals.add(terminal)
+        return True
 
     @classmethod
     def get_config(cls):
@@ -519,15 +622,22 @@ class Remote(MenuItem):
             return self.config['container_default_profile']
         return ''
 
-    def _apply_host_settings(self, terminal):
+    def _apply_host_settings(self, terminal, proc=None, proc_type=None):
         """ setup terminal if host is in config """
-        profile = self._get_default_profile(self.remote_type)
+        print(f"Got args {proc} of type {proc_type}")
+    
+        remote_proc = self.remote_proc if proc is None else proc
+        remote_type = self.remote_type if proc_type is None else proc_type
+
+        print(f"getting profile for {remote_proc} of type {remote_type}")
+
+        profile = self._get_default_profile(remote_type)
         if not profile:
             dbg("no default profile specified in config")
         # check host entry in config
-        remoteHost = self.remote_type.GetHost(self.remote_proc)
+        remoteHost = remote_type.GetHost(remote_proc)
         if not remoteHost:
-            err(f"cannot determine host for proc {self.remote_proc}")
+            err(f"cannot determine host for proc {remote_proc}")
         elif remoteHost not in self.config:
             dbg(f"no host entry for {remoteHost}")
         else:
@@ -539,8 +649,9 @@ class Remote(MenuItem):
         if not profile:
             dbg("cant find a profile in config")
             return
-        dbg(f"applying profile: {profile}")
-        terminal.set_profile(None, profile=profile)
+        if terminal.get_profile() != profile:
+            dbg(f"applying profile: {profile}")
+            terminal.set_profile(None, profile=profile)
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
