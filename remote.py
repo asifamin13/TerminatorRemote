@@ -346,7 +346,6 @@ class RemoteProcWatch(object):
     async def _poll(self):
         """ check psutil proc info """
         while not self.quit:
-            print(f"polling {len(self.watches)} procs...")
             for procPid in list(self.watches.keys()):
                 try:
                     ret = self._has_remote_session(procPid)
@@ -356,8 +355,8 @@ class RemoteProcWatch(object):
                     del self.watches[procPid]
             # this happens when we are exiting
             if len(self.watches) == 0:
-                print("raising quit flag!")
                 self.quit = True
+                break
             await asyncio.sleep(self.poll_rate)
 
     async def _async_main(self):
@@ -409,6 +408,9 @@ class Remote(MenuItem):
         self.remote_type = None
         self.remote_cwd = None
 
+        # current terminals with a remote session found via polling
+        self.currRemoteTerminals = dict() # terminal -> last profile
+
         # timer callbacks
         self.timeout_id = None
         self.watch_id = GLib.timeout_add(
@@ -420,24 +422,30 @@ class Remote(MenuItem):
         # Proc watch poller
         self.remote_proc_watch = RemoteProcWatch(self.remote_session_types)
 
+    def isNewlySpawned(self, pid):
+        proc = psutil.Process(pid)
+        return abs(time.time() - proc.create_time()) < 3 * self.remote_proc_watch.poll_rate
+
     def _update_watches(self, _):
         """
         Watch for new terminals in background
         """
-        currRemoteTerminals = set()
         for terminal in self.terminator.terminals:
             self.remote_proc_watch.Register(terminal.pid)
             ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
             if ret:
                 child, remoteType = ret
-                if terminal not in currRemoteTerminals:
-                    print(f"found remote session {child} of type {remoteType}!")
+                if terminal not in self.currRemoteTerminals:
                     self._apply_host_settings(
                         terminal=terminal, 
                         proc=child, 
                         proc_type=remoteType
                     )
-                    currRemoteTerminals.add(terminal)
+            else:
+                if terminal in self.currRemoteTerminals and not self.isNewlySpawned(terminal.pid):
+                    dbg(f"restoring original profile: {self.currRemoteTerminals[terminal]}")
+                    terminal.set_profile(None, profile=self.currRemoteTerminals[terminal])
+                    self.currRemoteTerminals.pop(terminal)
         return True
 
     @classmethod
@@ -624,12 +632,9 @@ class Remote(MenuItem):
 
     def _apply_host_settings(self, terminal, proc=None, proc_type=None):
         """ setup terminal if host is in config """
-        print(f"Got args {proc} of type {proc_type}")
     
         remote_proc = self.remote_proc if proc is None else proc
         remote_type = self.remote_type if proc_type is None else proc_type
-
-        print(f"getting profile for {remote_proc} of type {remote_type}")
 
         profile = self._get_default_profile(remote_type)
         if not profile:
@@ -651,6 +656,7 @@ class Remote(MenuItem):
             return
         if terminal.get_profile() != profile:
             dbg(f"applying profile: {profile}")
+            self.currRemoteTerminals[terminal] = terminal.get_profile()
             terminal.set_profile(None, profile=profile)
 
     def _has_remote_session(self, pid):
