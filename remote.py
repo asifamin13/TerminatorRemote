@@ -60,8 +60,6 @@ import time
 import getopt
 import argparse
 import re
-import threading
-import asyncio
 import psutil
 
 from typing import Optional, List
@@ -303,7 +301,7 @@ class ContainerSession(RemoteSession):
 
 class RemoteProcWatch(object):
     """ 
-    cache current remote sessions in background away from the GTK loop
+    cache current remote sessions
     """
     def __init__(self, session_types) -> None:
         """ constructor """
