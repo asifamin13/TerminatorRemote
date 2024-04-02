@@ -143,9 +143,10 @@ class SSHSession(RemoteSession):
             ssh_args = proc.cmdline()[1:]
             _, args = getopt.getopt(ssh_args, shortOpts)
             return extractHost(args[0])
+        except psutil.NoSuchProcess as e:
+            dbg("proc has gone away")
         except Exception as e:
-            err(f"caught error: {e}")
-
+            dbg(f"caught error: {e}")
         return None
 
     def Clone(self, proc):
@@ -180,6 +181,8 @@ class ContainerSession(RemoteSession):
             elif cmd == "attach":
                 return self._get_host_attach(proc)
             err("unrecognized sub command?")
+        except psutil.NoSuchProcess as e:
+            dbg(f"proc has gone away: {e}") 
         except Exception as e:
             err(f"caught exception {e}")
         return None
@@ -205,9 +208,14 @@ class ContainerSession(RemoteSession):
     def _get_command(self, proc):
         """ get type of container command, we only support interactive ones """
         interactiveCmds = { 'run', 'exec', 'attach' }
-        for arg in proc.cmdline():
-            if arg in interactiveCmds:
-                return arg
+        try:
+            for arg in proc.cmdline():
+                if arg in interactiveCmds:
+                    return arg
+        except psutil.NoSuchProcess as e:
+            dbg(f"process has gone away: {e}")
+        except Exception as e:
+            err(f"unhandled exception: {e}")
         return None
 
     def _get_host_run(self, proc):
@@ -223,7 +231,7 @@ class ContainerSession(RemoteSession):
             dbg(f"parsed container name: {name}")
             return name
         except Exception as e:
-            err("caught error '{e}'")
+            dbg(f"caught error '{e}'")
         return None
 
     def _get_host_exec(self, proc):
@@ -619,7 +627,7 @@ class Remote(MenuItem):
         # check host entry in config
         remoteHost = remote_type.GetHost(remote_proc)
         if not remoteHost:
-            err(f"cannot determine host for proc {remote_proc}")
+            dbg(f"cannot determine host for proc {remote_proc}")
         elif remoteHost not in self.config:
             dbg(f"no host entry for {remoteHost}")
         else:
