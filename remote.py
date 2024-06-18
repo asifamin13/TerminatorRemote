@@ -45,7 +45,7 @@ CONFIGURATION
 DEBUGGING
     To debug, start Terminator from another terminal emulator like so:
 
-    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession
+    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch -u
 
 DEVELOPMENT
     support for future types of "Remote Sessions" can be easily added by
@@ -61,6 +61,8 @@ import getopt
 import argparse
 import re
 import psutil
+import asyncio
+import threading
 
 from typing import Optional, List
 
@@ -182,7 +184,7 @@ class ContainerSession(RemoteSession):
                 return self._get_host_attach(proc)
             err("unrecognized sub command?")
         except psutil.NoSuchProcess as e:
-            dbg(f"proc has gone away: {e}") 
+            dbg(f"proc has gone away: {e}")
         except Exception as e:
             err(f"caught exception {e}")
         return None
@@ -308,13 +310,18 @@ class ContainerSession(RemoteSession):
         return args.container
 
 class RemoteProcWatch(object):
-    """ 
+    """
     cache current remote sessions
     """
-    def __init__(self, session_types) -> None:
+    def __init__(self, session_types, poll_rate=1.0) -> None:
         """ constructor """
         self.remote_session_types = session_types
+        self.poll_rate = poll_rate
         self.watches = dict() # pid -> None or (psutil.Process, RemoteSession)
+
+        self.quit = False
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._external_thread)
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
@@ -333,6 +340,9 @@ class RemoteProcWatch(object):
             return
         dbg(f"adding new pid {pid}")
         self.watches[pid] = None
+        # start poll thread if not yet started
+        if not self.thread.is_alive():
+            self.thread.start()
 
     def GetPIDProcInfo(self, pid):
         """ get current remote proc info """
@@ -340,18 +350,34 @@ class RemoteProcWatch(object):
             return None
         return self.watches[pid]
 
-    def Poll(self):
+    async def _poll(self):
         """ check psutil proc info """
-        for procPid in list(self.watches.keys()):
-            try:
-                ret = self._has_remote_session(procPid)
-                self.watches[procPid] = ret
-            except psutil.NoSuchProcess as e:
-                dbg(f"removing proc: {procPid}")
-                # pid has gone away
-                del self.watches[procPid]
-            except Exception as e:
-                dbg(f"caught generic exception: {e}")
+        while not self.quit:
+            for procPid in list(self.watches.keys()):
+                try:
+                    ret = self._has_remote_session(procPid)
+                    self.watches[procPid] = ret
+                except psutil.NoSuchProcess as e:
+                    dbg(f"removing proc: {procPid}")
+                    # pid has gone away
+                    del self.watches[procPid]
+                except Exception as e:
+                    dbg(f"caught generic exception: {e}")
+            if len(self.watches) == 0:
+                dbg(f"no watches, leaving!")
+                self.quit = True
+                break
+            await asyncio.sleep(self.poll_rate)
+
+    async def _async_main(self):
+        """ async stuff """
+        task = self.loop.create_task(self._poll())
+        await task
+
+    def _external_thread(self):
+        """ external event loop """
+        self.loop.run_until_complete(self._async_main())
+        self.loop.close()
 
 class Remote(MenuItem):
     """
@@ -421,8 +447,8 @@ class Remote(MenuItem):
                 child, remoteType = ret
                 if terminal not in self.currRemoteTerminals:
                     self._apply_host_settings(
-                        terminal=terminal, 
-                        proc=child, 
+                        terminal=terminal,
+                        proc=child,
                         proc_type=remoteType
                     )
             else:
@@ -430,7 +456,6 @@ class Remote(MenuItem):
                     dbg(f"restoring original profile: {self.currRemoteTerminals[terminal]}")
                     terminal.set_profile(None, profile=self.currRemoteTerminals[terminal])
                     self.currRemoteTerminals.pop(terminal)
-        self.remote_proc_watch.Poll()
         return True
 
     @classmethod
@@ -617,7 +642,6 @@ class Remote(MenuItem):
 
     def _apply_host_settings(self, terminal, proc=None, proc_type=None):
         """ setup terminal if host is in config """
-    
         remote_proc = self.remote_proc if proc is None else proc
         remote_type = self.remote_type if proc_type is None else proc_type
 
