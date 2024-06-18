@@ -45,7 +45,7 @@ CONFIGURATION
 DEBUGGING
     To debug, start Terminator from another terminal emulator like so:
 
-    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession
+    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch -u
 
 DEVELOPMENT
     support for future types of "Remote Sessions" can be easily added by

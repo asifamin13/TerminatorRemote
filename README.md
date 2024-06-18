@@ -55,7 +55,7 @@ Plugin section in `~/.config/terminator/config` :
 To debug, start Terminator from another terminal emulator like so:
 
 ```shell
-terminator -d --debug-classes Remote,SSHSession,ContainerSession
+terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch -u
 ```
 
 ## Development
