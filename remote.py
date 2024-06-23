@@ -346,7 +346,7 @@ class RemoteProcWatch(object):
 
         self.quit = False
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._external_thread)
+        self.thread = threading.Thread(target=self._external_thread, daemon=True)
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
