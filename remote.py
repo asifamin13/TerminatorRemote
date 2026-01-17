@@ -63,6 +63,7 @@ import re
 import psutil
 import asyncio
 import threading
+import shlex
 
 from typing import Optional, List
 
@@ -80,6 +81,8 @@ from terminatorlib.translation import _
 from terminatorlib.version import APP_NAME, APP_VERSION
 
 AVAILABLE = ['Remote']
+
+CD_WITH_FEEDBACK_SNIPPET = "cd -- {cwd} 2>/dev/null"
 
 def vte_get_text(vte_term, start_row, start_col, end_row, end_col):
     """ wrapper for get_text_range* based on Vte version """
@@ -649,11 +652,24 @@ class Remote(MenuItem):
         remote_cmd = self.remote_type.Clone(self.remote_proc)
         spawn_cmd = " ".join(remote_cmd) # get as full string, not list of strings
         cmd = f"{spawn_cmd}{os.linesep}" # make sure we press "enter"
-        if self.remote_cwd:
-            cmd += f"cd {self.remote_cwd}{os.linesep}"
+        
         dbg(f"will launch '{cmd}' into new terminal")
         vte = terminal.get_vte()
         vte.feed_child(cmd.encode())
+
+        if self.remote_cwd in (None, "", "~"):
+            dbg("dont have valid remote_cwd")
+        else:
+            snippet = CD_WITH_FEEDBACK_SNIPPET.format(
+                cwd=shlex.quote(self.remote_cwd)
+            ) + os.linesep
+
+            dbg(f"will send snippet '{snippet}' into new terminal")
+            def send_later():
+                vte.feed_child(snippet.encode())
+                return False # run once
+            GLib.timeout_add(250, send_later)
+
         self._apply_host_settings(terminal)
 
     def _get_default_profile(self, remote_type):
