@@ -82,7 +82,7 @@ from terminatorlib.version import APP_NAME, APP_VERSION
 
 AVAILABLE = ['Remote']
 
-CD_WITH_FEEDBACK_SNIPPET = "cd -- {cwd} 2>/dev/null"
+CD_CMD = "cd -- {cwd} 2>/dev/null"
 
 def vte_get_text(vte_term, start_row, start_col, end_row, end_col):
     """ wrapper for get_text_range* based on Vte version """
@@ -660,7 +660,7 @@ class Remote(MenuItem):
         if self.remote_cwd in (None, "", "~"):
             pass
         else:
-            snippet = CD_WITH_FEEDBACK_SNIPPET.format(
+            snippet = CD_CMD.format(
                 cwd=shlex.quote(self.remote_cwd)
             ) + os.linesep
 
