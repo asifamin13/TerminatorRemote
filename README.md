@@ -12,6 +12,16 @@ By default, the CWD is inferred by regex-matching the PS1 in the terminal scroll
 Heavily inspired by https://github.com/ilgarm/terminator_plugins which is
 no longer mainained
 
+## Clone into Highlighted Path
+
+If you highlight a file path in the terminal before right-clicking, two additional
+menu items will appear: **"Clone Horizontally into /the/path"** and
+**"Clone Vertically into /the/path"**. These clone the remote session and `cd`
+directly into the highlighted path — no regex or `pwd` detection needed.
+
+This is useful when the CWD isn't in your prompt or you want to clone into a
+different directory than the current one.
+
 ## Use pwd for CWD
 
 When enabled via the context menu toggle, clone operations will send `pwd` to the

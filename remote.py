@@ -63,12 +63,10 @@ import re
 import psutil
 import asyncio
 import threading
-import shlex
-
 from typing import Optional, List
 
 import gi
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib, Gdk
 gi.require_version('Vte', '2.91')
 from gi.repository import Vte
 
@@ -633,6 +631,36 @@ class Remote(MenuItem):
 
         GLib.timeout_add(500, read_pwd_output)
 
+    def _get_selected_path(self, terminal):
+        """
+        Get the currently selected text from the terminal and check if it
+        looks like a file path. Returns the path string or None.
+        Uses the primary selection (highlight buffer), not the clipboard.
+        When the user explicitly highlights text that starts with / or ~/,
+        trust it verbatim rather than running it through the regex (which
+        can mangle paths with underscores or other characters).
+        """
+        vte = terminal.get_vte()
+        if not vte.get_has_selection():
+            return None
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY)
+        text = clipboard.wait_for_text()
+        if not text:
+            return None
+        text = text.strip()
+        # Trust user selection directly if it looks like an absolute or home path
+        if text.startswith('/') or text.startswith('~/'):
+            dbg(f"Using raw selection as path: {text}")
+            return text
+        # Fall back to regex for paths embedded in other text
+        match = self.cwd_regex.search(text)
+        if match:
+            path = match.group()
+            dbg(f"Found path in selection via regex: {path}")
+            return path
+        dbg(f"Selection does not look like a path: '{text}'")
+        return None
+
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
         ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
@@ -680,6 +708,29 @@ class Remote(MenuItem):
         )
         menuitems.append(item)
 
+        # "Clone into <path>" items — only shown when a path is selected
+        selected_path = self._get_selected_path(terminal)
+        if selected_path:
+            item = get_image_menuitem(
+                _('Clone Horizontally into %s') % selected_path, horiz=True
+            )
+            item.connect(
+                'activate',
+                self._menu_item_activated_into,
+                ('split-horiz', terminal, selected_path)
+            )
+            menuitems.append(item)
+
+            item = get_image_menuitem(
+                _('Clone Vertically into %s') % selected_path, horiz=False
+            )
+            item.connect(
+                'activate',
+                self._menu_item_activated_into,
+                ('split-vert', terminal, selected_path)
+            )
+            menuitems.append(item)
+
         # toggle to use pwd for CWD detection instead of regex
         item = Gtk.CheckMenuItem(_('Use pwd for CWD'))
         item.set_active(self.config['use_pwd'])
@@ -717,6 +768,26 @@ class Remote(MenuItem):
     def _on_use_pwd(self, widget, data):
         """ handle use pwd toggle """
         self.config['use_pwd'] = widget.get_active()
+
+    def _menu_item_activated_into(self, _, args):
+        """
+        clone callback with explicit CWD from selected text,
+        args: ( signal, terminal, cwd_path )
+        Bypasses regex/pwd detection — uses the highlighted path directly.
+        """
+        signal, terminal, cwd_path = args
+
+        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
+        if not ret:
+            err("lost remote session seen on context menu?")
+            return
+        child, remoteType = ret
+        if not self.timeout_id:
+            self.remote_proc = child
+            self.remote_type = remoteType
+            self._continue_clone(signal, terminal, cwd_path)
+        else:
+            err("already waiting for a terminal?")
 
     def _poll_new_terminals(self, start_time):
         """
@@ -773,7 +844,7 @@ class Remote(MenuItem):
             pass
         else:
             snippet = CD_CMD.format(
-                cwd=shlex.quote(self.remote_cwd)
+                cwd=self.remote_cwd
             ) + os.linesep
 
             dbg(f"will send snippet '{snippet}' into new terminal")
