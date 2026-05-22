@@ -346,6 +346,8 @@ class RemoteProcWatch(object):
         self.remote_session_types = session_types
         self.poll_rate = poll_rate
         self.watches = dict() # pid -> None or (psutil.Process, RemoteSession)
+        self.create_times = dict() # pid -> create_time (cached to avoid syscalls on UI thread)
+        self._lock = threading.Lock()
 
         self.quit = False
         self.loop = asyncio.new_event_loop()
@@ -364,37 +366,54 @@ class RemoteProcWatch(object):
 
     def Register(self, pid):
         """ watch PID for children """
-        if pid in self.watches:
-            return
-        dbg(f"adding new pid {pid}")
-        self.watches[pid] = None
+        with self._lock:
+            if pid in self.watches:
+                return
+            dbg(f"adding new pid {pid}")
+            self.watches[pid] = None
+            # cache create_time once to avoid repeated syscalls on the UI thread
+            try:
+                self.create_times[pid] = psutil.Process(pid).create_time()
+            except psutil.NoSuchProcess:
+                self.create_times[pid] = None
         # start poll thread if not yet started
         if not self.thread.is_alive():
             self.thread.start()
 
     def GetPIDProcInfo(self, pid):
         """ get current remote proc info """
-        if pid not in self.watches:
-            return None
-        return self.watches[pid]
+        with self._lock:
+            if pid not in self.watches:
+                return None
+            return self.watches[pid]
+
+    def GetCreateTime(self, pid):
+        """ get cached create_time for pid, avoiding syscall on UI thread """
+        with self._lock:
+            return self.create_times.get(pid)
 
     async def _poll(self):
         """ check psutil proc info """
         while not self.quit:
-            for procPid in list(self.watches.keys()):
+            with self._lock:
+                pids = list(self.watches.keys())
+            for procPid in pids:
                 try:
                     ret = self._has_remote_session(procPid)
-                    self.watches[procPid] = ret
+                    with self._lock:
+                        self.watches[procPid] = ret
                 except psutil.NoSuchProcess as e:
                     dbg(f"removing proc: {procPid}")
-                    # pid has gone away
-                    del self.watches[procPid]
+                    with self._lock:
+                        self.watches.pop(procPid, None)
+                        self.create_times.pop(procPid, None)
                 except Exception as e:
                     dbg(f"caught generic exception: {e}")
-            if len(self.watches) == 0:
-                dbg(f"no watches, leaving!")
-                self.quit = True
-                break
+            with self._lock:
+                if len(self.watches) == 0:
+                    dbg(f"no watches, leaving!")
+                    self.quit = True
+                    break
             await asyncio.sleep(self.poll_rate)
 
     async def _async_main(self):
@@ -461,8 +480,10 @@ class Remote(MenuItem):
         self.remote_proc_watch = RemoteProcWatch(self.remote_session_types)
 
     def _isNewlySpawned(self, pid):
-        proc = psutil.Process(pid)
-        return abs(time.time() - proc.create_time()) < 3
+        create_time = self.remote_proc_watch.GetCreateTime(pid)
+        if create_time is None:
+            return False
+        return abs(time.time() - create_time) < 3
 
     def _update_watches(self, _):
         """
@@ -537,7 +558,7 @@ class Remote(MenuItem):
 
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
-        ret = self.remote_proc_watch._has_remote_session(terminal.pid)
+        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
         if not ret:
             return
         child, remote_session = ret
@@ -715,7 +736,7 @@ class Remote(MenuItem):
         """ handle upstream split command, called AFTER default handler """
         dbg(f"handling split on terminal {terminal}!")
         # make sure original terminal still has remote session
-        ret = self.remote_proc_watch._has_remote_session(terminal.pid)
+        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
         if not ret:
             err("lost remote session seen on context menu?")
             return
@@ -749,7 +770,7 @@ class Remote(MenuItem):
         """
         signal, terminal = args
 
-        ret = self.remote_proc_watch._has_remote_session(terminal.pid)
+        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
         if not ret:
             err("lost remote session seen on context menu?")
             return
