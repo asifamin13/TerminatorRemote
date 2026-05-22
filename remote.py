@@ -374,7 +374,7 @@ class RemoteProcWatch(object):
         children = psutil.Process(pid).children(recursive=False)
         if not children:
             return None
-        dbg(f"terminal PID {pid} has direct children: {children}")
+        dbg(f"terminal PID {pid} has direct children: {children}!!")
         for child in children:
             with child.oneshot():
                 for remote_session in self.remote_session_types:
@@ -589,6 +589,48 @@ class Remote(MenuItem):
         dbg(f"cant find remote cwd in '{lines}'")
         return None
 
+    def _get_cwd_via_pwd(self, terminal, callback):
+        """
+        Send 'pwd' to the terminal and parse the output to get the CWD.
+        This is more reliable than regex-based detection but requires the
+        shell to be idle. Calls callback(cwd_string_or_None) when done.
+        """
+        vte = terminal.get_vte()
+        currCol, currRow = vte.get_cursor_position()
+
+        # Send pwd command
+        vte.feed_child(b'pwd\n')
+
+        def read_pwd_output():
+            newCol, newRow = vte.get_cursor_position()
+            text = vte_get_text(
+                vte_term=vte,
+                start_row=currRow,
+                start_col=currCol,
+                end_row=newRow,
+                end_col=newCol
+            )
+            cwd = None
+            if text:
+                dbg(f"pwd output text: '{text}'")
+                for line in text.split('\n'):
+                    line = line.strip()
+                    # pwd outputs a single line with the absolute path
+                    # skip the "pwd" echo and any prompt lines
+                    if line.startswith('/') or line.startswith('~'):
+                        # make sure this isn't a prompt line (no $, #, @, : etc)
+                        if not any(c in line for c in ['$','#','@',':',';','>','<','|']):
+                            cwd = line
+                            break
+            if cwd:
+                dbg(f"Got CWD via pwd: {cwd}")
+            else:
+                dbg(f"Could not parse pwd output from '{text}'")
+            callback(cwd)
+            return False  # run once
+
+        GLib.timeout_add(500, read_pwd_output)
+
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
         ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
@@ -632,6 +674,23 @@ class Remote(MenuItem):
         item.connect(
             'activate',
             self._menu_item_activated,
+            ('split-vert', terminal)
+        )
+        menuitems.append(item)
+        
+        # pwd-based split buttons (more reliable CWD detection)
+        item = get_image_menuitem(_('Clone Horizontally (pwd)'), horiz=True)
+        item.connect(
+            'activate',
+            self._menu_item_activated_pwd,
+            ('split-horiz', terminal)
+        )
+        menuitems.append(item)
+
+        item = get_image_menuitem(_('Clone Vertically (pwd)'), horiz=False)
+        item.connect(
+            'activate',
+            self._menu_item_activated_pwd,
             ('split-vert', terminal)
         )
         menuitems.append(item)
@@ -797,6 +856,21 @@ class Remote(MenuItem):
         else:
             err("cant figure out the new terminal?")
 
+    def _continue_clone(self, signal, terminal, remote_cwd):
+        """Continue the clone process after CWD has been determined"""
+        self.remote_cwd = remote_cwd
+        # get list of current terminals, we will watch for a new one
+        self.peers = self._get_all_terminals()
+        dbg("First peer list: {}".format(self.peers))
+        # launch idle callback to poll for new terminals
+        self.timeout_id = GLib.idle_add(
+            self._poll_new_terminals,
+            time.time()
+        )
+        self._apply_host_settings(terminal)
+        # launch new terminal
+        terminal.emit(signal, terminal.get_cwd())
+
     def _menu_item_activated(self, _, args):
         """
         clone callback, args: ( signal, terminal )
@@ -811,18 +885,33 @@ class Remote(MenuItem):
         if not self.timeout_id: # check if we are already waiting
             self.remote_proc = child
             self.remote_type = remoteType
-            if self.config['infer_cwd']:
-                self.remote_cwd = self._get_cwd_from_lines(terminal)
-            # get list of current terminals, we will watch for a new one
-            self.peers = self._get_all_terminals()
-            dbg("First peer list: {}".format(self.peers))
-            # launch idle callback to poll for new terminals
-            self.timeout_id = GLib.idle_add(
-                self._poll_new_terminals,
-                time.time()
+            remote_cwd = self._get_cwd_from_lines(terminal) if self.config['infer_cwd'] else None
+            self._continue_clone(signal, terminal, remote_cwd)
+        else:
+            err("already waiting for a terminal?")
+
+    def _menu_item_activated_pwd(self, _, args):
+        """
+        clone callback using pwd to determine CWD, args: ( signal, terminal )
+        Sends 'pwd' to the terminal and parses the output for a more
+        reliable CWD detection than regex-based scanning. Requires the
+        shell to be idle (not running a long command).
+        """
+        signal, terminal = args
+
+        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
+        if not ret:
+            err("lost remote session seen on context menu?")
+            return
+        child, remoteType = ret
+        if not self.timeout_id: # check if we are already waiting
+            self.remote_proc = child
+            self.remote_type = remoteType
+            # Set sentinel to prevent re-entry while waiting for pwd output
+            self.timeout_id = True
+            self._get_cwd_via_pwd(
+                terminal,
+                lambda cwd: self._continue_clone(signal, terminal, cwd)
             )
-            self._apply_host_settings(terminal)
-            # launch new terminal
-            terminal.emit(signal, terminal.get_cwd())
         else:
             err("already waiting for a terminal?")

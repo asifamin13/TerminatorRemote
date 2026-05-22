@@ -6,10 +6,21 @@ A Terminator plugin which adds features for ssh and docker/podman to the context
 
 ## Clone Horizontally/Vertically
 
-This will clone your current SSH/container session into a newly spawned terminal
+This will clone your current SSH/container session into a newly spawned terminal.
+The CWD is inferred by regex-matching the PS1 in the terminal scrollback.
 
 Heavily inspired by https://github.com/ilgarm/terminator_plugins which is
 no longer mainained
+
+## Clone Horizontally/Vertically (pwd)
+
+Same as the regular clone, but uses `pwd` to determine the remote working directory
+instead of regex-matching the PS1. This is more reliable when the CWD isn't visible
+in the prompt area (e.g. scrolled off screen or a minimal PS1).
+
+**Important:** This sends `pwd` to your remote shell, so the shell must be idle
+(not running a long command). If a command is running, use the regular clone
+items instead.
 
 ## Profile Host Matching
 
