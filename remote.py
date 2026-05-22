@@ -547,7 +547,8 @@ class Remote(MenuItem):
             'ssh_default_profile': "",
             'container_default_profile': "",
             'auto_clone': "False",
-            'infer_cwd': "True"
+            'infer_cwd': "True",
+            'use_pwd': "False"
         }
         user_config = Config().plugin_get_config(cls.__name__)
         dbg(f"read user config: {user_config}")
@@ -563,6 +564,7 @@ class Remote(MenuItem):
 
         get_as_bool(config, 'auto_clone')
         get_as_bool(config, 'infer_cwd')
+        get_as_bool(config, 'use_pwd')
         return config
 
     def _get_cwd_from_lines(self, terminal, N=3):
@@ -677,21 +679,14 @@ class Remote(MenuItem):
             ('split-vert', terminal)
         )
         menuitems.append(item)
-        
-        # pwd-based split buttons (more reliable CWD detection)
-        item = get_image_menuitem(_('Clone Horizontally (pwd)'), horiz=True)
-        item.connect(
-            'activate',
-            self._menu_item_activated_pwd,
-            ('split-horiz', terminal)
-        )
-        menuitems.append(item)
 
-        item = get_image_menuitem(_('Clone Vertically (pwd)'), horiz=False)
+        # toggle to use pwd for CWD detection instead of regex
+        item = Gtk.CheckMenuItem(_('Use pwd for CWD'))
+        item.set_active(self.config['use_pwd'])
         item.connect(
-            'activate',
-            self._menu_item_activated_pwd,
-            ('split-vert', terminal)
+            'toggled',
+            self._on_use_pwd,
+            None
         )
         menuitems.append(item)
 
@@ -718,6 +713,10 @@ class Remote(MenuItem):
     def _on_clone_on_split(self, widget, data):
         """ handle check text box """
         self.config['auto_clone'] = widget.get_active()
+
+    def _on_use_pwd(self, widget, data):
+        """ handle use pwd toggle """
+        self.config['use_pwd'] = widget.get_active()
 
     def _poll_new_terminals(self, start_time):
         """
@@ -885,33 +884,17 @@ class Remote(MenuItem):
         if not self.timeout_id: # check if we are already waiting
             self.remote_proc = child
             self.remote_type = remoteType
-            remote_cwd = self._get_cwd_from_lines(terminal) if self.config['infer_cwd'] else None
-            self._continue_clone(signal, terminal, remote_cwd)
-        else:
-            err("already waiting for a terminal?")
-
-    def _menu_item_activated_pwd(self, _, args):
-        """
-        clone callback using pwd to determine CWD, args: ( signal, terminal )
-        Sends 'pwd' to the terminal and parses the output for a more
-        reliable CWD detection than regex-based scanning. Requires the
-        shell to be idle (not running a long command).
-        """
-        signal, terminal = args
-
-        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
-        if not ret:
-            err("lost remote session seen on context menu?")
-            return
-        child, remoteType = ret
-        if not self.timeout_id: # check if we are already waiting
-            self.remote_proc = child
-            self.remote_type = remoteType
-            # Set sentinel to prevent re-entry while waiting for pwd output
-            self.timeout_id = True
-            self._get_cwd_via_pwd(
-                terminal,
-                lambda cwd: self._continue_clone(signal, terminal, cwd)
-            )
+            if self.config['use_pwd']:
+                # Use pwd for CWD detection (requires idle shell)
+                self.timeout_id = True  # sentinel to prevent re-entry
+                self._get_cwd_via_pwd(
+                    terminal,
+                    lambda cwd: self._continue_clone(signal, terminal, cwd)
+                )
+            elif self.config['infer_cwd']:
+                remote_cwd = self._get_cwd_from_lines(terminal)
+                self._continue_clone(signal, terminal, remote_cwd)
+            else:
+                self._continue_clone(signal, terminal, None)
         else:
             err("already waiting for a terminal?")
