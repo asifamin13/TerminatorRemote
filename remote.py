@@ -84,13 +84,15 @@ AVAILABLE = ['Remote']
 
 CD_CMD = "cd -- {cwd} 2>/dev/null"
 
+# Cache VTE version check at module load instead of per-call
+_VTE_VERSION = "{}.{}".format(
+    Vte.get_major_version(), 
+    Vte.get_minor_version()
+)
+
 def vte_get_text(vte_term, start_row, start_col, end_row, end_col):
     """ wrapper for get_text_range* based on Vte version """
-    version = "{}.{}".format(
-        Vte.get_major_version(), 
-        Vte.get_minor_version()
-    )
-    if version < "0.72":
+    if _VTE_VERSION < "0.72":
         return vte_term.get_text_range(
             start_row=start_row,
             start_col=start_col,
@@ -188,6 +190,39 @@ class ContainerSession(RemoteSession):
     def __init__(self, exe):
         """ constructor """
         super().__init__(exe)
+        # Pre-create ArgumentParser instances to avoid rebuilding on every call
+        self._exec_parser = self._create_exec_parser()
+        self._attach_parser = self._create_attach_parser()
+
+    @staticmethod
+    def _create_exec_parser():
+        """ pre-create the exec argument parser """
+        parser = argparse.ArgumentParser()
+        parser.add_argument("container")
+        parser.add_argument("command", nargs='?')
+        parser.add_argument('-d', '--detach', action='store_true')
+        parser.add_argument('--detach-keys')
+        parser.add_argument('-e', '--env')
+        parser.add_argument('--env-file')
+        parser.add_argument('-i', '--interactive', action='store_true')
+        parser.add_argument('-l', '--latest', action='store_true')
+        parser.add_argument('--privileged')
+        parser.add_argument('--preserve-fds')
+        parser.add_argument('-t', '--tty', action='store_true')
+        parser.add_argument('-u', '--user')
+        parser.add_argument('-w', '--workdir')
+        return parser
+
+    @staticmethod
+    def _create_attach_parser():
+        """ pre-create the attach argument parser """
+        parser = argparse.ArgumentParser()
+        parser.add_argument("container")
+        parser.add_argument('--detach-keys')
+        parser.add_argument('-l', '--latest', action='store_true')
+        parser.add_argument('--no-stdin', action='store_false')
+        parser.add_argument('--sig-proxy', action='store_true')
+        return parser
 
     def IsType(self, proc):
         """ check if this is a running docker session """
@@ -284,21 +319,7 @@ class ContainerSession(RemoteSession):
         """
         fullArgs = proc.cmdline()
         startIndex = fullArgs.index('exec') + 1
-        parser = argparse.ArgumentParser()
-        parser.add_argument("container")
-        parser.add_argument("command", nargs='?')
-        parser.add_argument('-d', '--detach', action='store_true')
-        parser.add_argument('--detach-keys')
-        parser.add_argument('-e', '--env')
-        parser.add_argument('--env-file')
-        parser.add_argument('-i', '--interactive', action='store_true')
-        parser.add_argument('-l', '--latest', action='store_true')
-        parser.add_argument('--privileged')
-        parser.add_argument('--preserve-fds')
-        parser.add_argument('-t', '--tty', action='store_true')
-        parser.add_argument('-u', '--user')
-        parser.add_argument('-w', '--workdir')
-        args, unknown = parser.parse_known_args(fullArgs[startIndex:])
+        args, unknown = self._exec_parser.parse_known_args(fullArgs[startIndex:])
         dbg(f"got args: {args}, unknown: {unknown}")
         return args.container
 
@@ -327,13 +348,7 @@ class ContainerSession(RemoteSession):
         """
         fullArgs = proc.cmdline()
         startIndex = fullArgs.index('attach') + 1
-        parser = argparse.ArgumentParser()
-        parser.add_argument("container")
-        parser.add_argument('--detach-keys')
-        parser.add_argument('-l', '--latest', action='store_true')
-        parser.add_argument('--no-stdin', action='store_false')
-        parser.add_argument('--sig-proxy', action='store_true')
-        args, unknown = parser.parse_known_args(fullArgs[startIndex:])
+        args, unknown = self._attach_parser.parse_known_args(fullArgs[startIndex:])
         dbg(f"got args: {args}, unknown: {unknown}")
         return args.container
 
@@ -341,7 +356,7 @@ class RemoteProcWatch(object):
     """
     cache current remote sessions
     """
-    def __init__(self, session_types, poll_rate=1.0) -> None:
+    def __init__(self, session_types, poll_rate=0.5) -> None:
         """ constructor """
         self.remote_session_types = session_types
         self.poll_rate = poll_rate
@@ -355,8 +370,19 @@ class RemoteProcWatch(object):
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
+        # Try non-recursive first (cheap) — ssh/docker are typically direct children
+        children = psutil.Process(pid).children(recursive=False)
+        if not children:
+            return None
+        dbg(f"terminal PID {pid} has direct children: {children}")
+        for child in children:
+            with child.oneshot():
+                for remote_session in self.remote_session_types:
+                    if remote_session.IsType(child):
+                        return (child, remote_session)
+        # Fall back to recursive scan only if direct children had no match
         children = psutil.Process(pid).children(recursive=True)
-        dbg(f"terminal PID {pid} has children: {children}")
+        dbg(f"terminal PID {pid} has recursive children: {children}")
         for child in children:
             with child.oneshot():
                 for remote_session in self.remote_session_types:
@@ -399,6 +425,13 @@ class RemoteProcWatch(object):
                 pids = list(self.watches.keys())
             for procPid in pids:
                 try:
+                    # Skip expensive re-scan if previously found child is still alive
+                    with self._lock:
+                        prev = self.watches.get(procPid)
+                    if prev is not None:
+                        child_proc, _ = prev
+                        if child_proc.is_running():
+                            continue
                     ret = self._has_remote_session(procPid)
                     with self._lock:
                         self.watches[procPid] = ret
@@ -471,7 +504,7 @@ class Remote(MenuItem):
         # timer callbacks
         self.timeout_id = None
         self.watch_id = GLib.timeout_add(
-            1.0 * 1000,
+            0.5 * 1000,
             self._update_watches,
             None
         )
