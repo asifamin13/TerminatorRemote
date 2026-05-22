@@ -38,10 +38,37 @@ When you clone a remote session, you can apply a terminator profile based on hos
 
 Inspired by https://github.com/GratefulTony/TerminatorHostWatch which does this via regex matching your PS1
 
+## Docker/Podman API Integration
+
+When the `docker` Python SDK is installed (`pip install docker`), the plugin
+can use the Docker/Podman API for enhanced container support:
+
+- **Container working directory**: Automatically detected via `docker inspect`,
+  so `cd` is more reliable for containers
+- **`--workdir` on clone**: Container clones use `docker exec -w /path` instead
+  of sending a `cd` command after spawning
+
+The plugin tries these API sockets in order:
+1. `DOCKER_HOST` environment variable (if set)
+2. Rootless Podman: `unix:///run/user/{uid}/podman/podman.sock`
+3. Docker: `unix:///var/run/docker.sock`
+4. System Podman: `unix:///run/podman/podman.sock`
+
+If the SDK is not installed or no socket is available, the plugin falls back
+to the existing psutil-based cmdline parsing — no functionality is lost.
+
+**Podman users**: Enable the API socket with:
+```shell
+systemctl --user start podman.socket
+```
+
 ## Installing
 ```shell
 mkdir -p ~/.config/terminator/plugins
 cp remote.py ~/.config/terminator/plugins/
+
+# Optional: install Docker SDK for enhanced container support
+pip install docker
 ```
 
 Start Terminator. In Right Click -> Preferences -> Plugins, enable Remote
@@ -58,6 +85,9 @@ Plugin section in `~/.config/terminator/config` :
     # When a terminal with a remote session is cloned, attempt to parse the
     # current working directory via the PS1 and 'cd' into it
     infer_cwd = True
+
+    # Shell to use when cloning into a container (e.g. "bash --login", "zsh")
+    container_shell = sh
 
     # Optional default profile for all SSH sessions
     ssh_default_profile = common_ssh_profile
@@ -76,7 +106,7 @@ Plugin section in `~/.config/terminator/config` :
 To debug, start Terminator from another terminal emulator like so:
 
 ```shell
-terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch -u
+terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch,DockerAPI -u
 ```
 
 ## Development

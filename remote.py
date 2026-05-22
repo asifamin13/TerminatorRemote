@@ -65,6 +65,12 @@ import asyncio
 import threading
 from typing import Optional, List
 
+try:
+    import docker as docker_sdk
+    HAS_DOCKER_SDK = True
+except ImportError:
+    HAS_DOCKER_SDK = False
+
 import gi
 from gi.repository import Gtk, GLib, Gdk
 gi.require_version('Vte', '2.91')
@@ -105,6 +111,88 @@ def vte_get_text(vte_term, start_row, start_col, end_row, end_col):
         end_row=end_row,
         end_col=end_col
     )[0]
+
+class DockerAPI(object):
+    """
+    Optional Docker/Podman API integration for enhanced container info.
+    Falls back gracefully when the Docker SDK is not installed or the
+    API socket is not accessible. Works with both Docker and Podman
+    (Podman exposes a Docker-compatible API socket).
+    """
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        """Get the singleton DockerAPI instance"""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._client = None
+        self._tried_connect = False
+
+    def _connect(self):
+        """Try to connect to Docker/Podman API socket"""
+        if self._tried_connect:
+            return self._client
+        self._tried_connect = True
+
+        if not HAS_DOCKER_SDK:
+            dbg("Docker SDK not installed, skipping API integration")
+            return None
+
+        uid = os.getuid()
+        socket_urls = []
+
+        # Respect DOCKER_HOST env var if set
+        docker_host = os.environ.get('DOCKER_HOST', '')
+        if docker_host:
+            socket_urls.append(docker_host)
+
+        # Rootless Podman (most common for personal workstations)
+        socket_urls.append(f"unix:///run/user/{uid}/podman/podman.sock")
+
+        # Docker socket
+        socket_urls.append("unix:///var/run/docker.sock")
+
+        # System Podman socket
+        socket_urls.append("unix:///run/podman/podman.sock")
+
+        for socket_url in socket_urls:
+            try:
+                client = docker_sdk.DockerClient(base_url=socket_url)
+                client.ping()
+                dbg(f"Connected to container API at {socket_url}")
+                self._client = client
+                return self._client
+            except Exception as e:
+                dbg(f"Could not connect to {socket_url}: {e}")
+
+        dbg("No container API socket available")
+        return None
+
+    def get_container_info(self, name_or_id):
+        """
+        Get container info by name or ID.
+        Returns dict with 'name', 'working_dir' keys, or None if not found.
+        """
+        client = self._connect()
+        if not client:
+            return None
+        try:
+            container = client.containers.get(name_or_id)
+            attrs = container.attrs
+            info = {
+                'name': attrs.get('Name', '').lstrip('/'),
+                'working_dir': attrs.get('Config', {}).get('WorkingDir', ''),
+            }
+            dbg(f"Got container info via API: {info}")
+            return info
+        except Exception as e:
+            dbg(f"Container '{name_or_id}' not found via API: {e}")
+            return None
+
 
 class RemoteSession(object):
     """
@@ -250,13 +338,35 @@ class ContainerSession(RemoteSession):
             err(f"caught exception {e}")
         return None
 
-    def Clone(self, proc):
+    def GetWorkingDir(self, proc):
+        """
+        Try to get the container's working directory via the Docker API.
+        Returns the working dir string or None.
+        """
+        name = self.GetHost(proc)
+        if not name:
+            return None
+        info = DockerAPI.get_instance().get_container_info(name)
+        if info and info.get('working_dir'):
+            return info['working_dir']
+        return None
+
+    def Clone(self, proc, workdir=None, shell=None):
         """ get cmd to launch terminal into container session """
+        if shell is None:
+            shell = 'sh'
         cmd = self._get_command(proc)
         if not cmd:
             err("shouldnt happen?")
             return proc.cmdline()
         if cmd in ["exec" , "attach"]:
+            if workdir and cmd == "exec":
+                # Insert -w workdir into the existing exec command
+                result = list(proc.cmdline())
+                exec_idx = result.index('exec') + 1
+                result.insert(exec_idx, '-w')
+                result.insert(exec_idx + 1, workdir)
+                return result
             return proc.cmdline()
         # this is a docker run
         host = self.GetHost(proc)
@@ -266,7 +376,11 @@ class ContainerSession(RemoteSession):
             return proc.cmdline()
         else:
             # we should exec a terminal session here
-            return [ self.exe, 'exec', '-it', host, 'sh' ]
+            clone_cmd = [self.exe, 'exec', '-it']
+            if workdir:
+                clone_cmd.extend(['-w', workdir])
+            clone_cmd.extend([host] + shell.split())
+            return clone_cmd
 
     def _get_command(self, proc):
         """ get type of container command, we only support interactive ones """
@@ -283,18 +397,47 @@ class ContainerSession(RemoteSession):
 
     def _get_host_run(self, proc):
         """
-        docker run, just check for --name
-        If we dont have name (it would be random), give up.
-        I'd have to parse docker ps / inspect or use the
-        API which is a bit beyond the scope of this
+        docker/podman run — try to find the container name.
+        1. Check for --name in cmdline
+        2. Fall back to Docker/Podman API — pick the most recently
+           created running container
         """
+        # Try --name flag first
         try:
             idxOfName = proc.cmdline().index("--name")
             name = proc.cmdline()[idxOfName + 1]
             dbg(f"parsed container name: {name}")
             return name
+        except ValueError:
+            pass  # --name not in cmdline
         except Exception as e:
-            dbg(f"caught error '{e}'")
+            dbg(f"error looking for --name: {e}")
+
+        # Fall back to Docker/Podman API — pick most recently created container
+        api = DockerAPI.get_instance()
+        client = api._connect()
+        if not client:
+            dbg("No API available to find run container name")
+            return None
+
+        try:
+            candidates = []
+            for container in client.containers.list():
+                container_name = container.attrs.get('Name', '').lstrip('/')
+                container_created = container.attrs.get('Created', '')
+                candidates.append((container_name, container_created))
+
+            if candidates:
+                # Sort by creation time, pick the most recently created
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                name = candidates[0][0]
+                dbg(f"Selected most recently created container: '{name}'")
+                return name
+
+        except Exception as e:
+            dbg(f"Error finding container via API: {e}")
+
+        dbg("Could not determine container name for run command")
         return None
 
     def _get_host_exec(self, proc):
@@ -546,7 +689,8 @@ class Remote(MenuItem):
             'container_default_profile': "",
             'auto_clone': "False",
             'infer_cwd': "True",
-            'use_pwd': "False"
+            'use_pwd': "False",
+            'container_shell': "sh"
         }
         user_config = Config().plugin_get_config(cls.__name__)
         dbg(f"read user config: {user_config}")
@@ -832,7 +976,24 @@ class Remote(MenuItem):
 
     def _spawn_remote_session(self, terminal):
         """ spawn user session into terminal """
-        remote_cmd = self.remote_type.Clone(self.remote_proc)
+        # For containers, use --workdir flag only when the user explicitly
+        # chose a CWD (via regex, pwd, or selection). Don't fall back to
+        # the API's WorkingDir — the container is already running in its
+        # working directory and the API value may not actually exist.
+        workdir = None
+        if isinstance(self.remote_type, ContainerSession):
+            if self.remote_cwd:
+                workdir = self.remote_cwd
+
+        if isinstance(self.remote_type, ContainerSession):
+            remote_cmd = self.remote_type.Clone(
+                self.remote_proc,
+                workdir=workdir,
+                shell=self.config['container_shell']
+            )
+        else:
+            remote_cmd = self.remote_type.Clone(self.remote_proc)
+
         spawn_cmd = " ".join(remote_cmd) # get as full string, not list of strings
         cmd = f"{spawn_cmd}{os.linesep}" # make sure we press "enter"
         
