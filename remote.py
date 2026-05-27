@@ -759,13 +759,11 @@ class Remote(MenuItem):
                 dbg(f"pwd output text: '{text}'")
                 for line in text.split('\n'):
                     line = line.strip()
-                    # pwd outputs a single line with the absolute path
-                    # skip the "pwd" echo and any prompt lines
-                    if line.startswith('/') or line.startswith('~'):
-                        # make sure this isn't a prompt line (no $, #, @, : etc)
-                        if not any(c in line for c in ['$','#','@',':',';','>','<','|']):
-                            cwd = line
-                            break
+                    # pwd outputs the absolute path followed by a newline
+                    # take the first non-empty line
+                    if line and line != 'pwd':
+                        cwd = line
+                        break
             if cwd:
                 dbg(f"Got CWD via pwd: {cwd}")
             else:
