@@ -32,6 +32,20 @@ off screen or a minimal PS1).
 **Important:** This sends `pwd` to your remote shell, so the shell must be idle
 (not running a long command). Uncheck the toggle if a command is running.
 
+## SSH to Host
+
+A submenu listing all hosts from `~/.ssh/config` (skipping wildcard patterns).
+Clicking a host sends `ssh <host>` to the terminal. Supports `Include` directives
+in your SSH config.
+
+## Attach to Container
+
+A submenu listing all running containers (via the Docker/Podman API). Each entry
+shows the container name and image. Clicking a container sends
+`podman exec -it <name> <shell>` to the terminal, using the `container_shell` config.
+
+Only shown when the Docker/Podman API is available.
+
 ## Profile Host Matching
 
 When you clone a remote session, you can apply a terminator profile based on host or container name
@@ -89,6 +103,12 @@ Plugin section in `~/.config/terminator/config` :
     # Shell to use when cloning into a container (e.g. "bash --login", "zsh")
     container_shell = sh
 
+    # Delay in seconds before sending cd command after clone (default 0.25)
+    cd_delay = 0.25
+
+    # Path to SSH config file (supports ~ expansion)
+    ssh_config = ~/.ssh/config
+
     # Optional default profile for all SSH sessions
     ssh_default_profile = common_ssh_profile
 
@@ -96,9 +116,17 @@ Plugin section in `~/.config/terminator/config` :
     container_default_profile = common_docker_profile
 
     # You can override above defaults by specifing a host with a profile key
+    # and optionally send a command after connecting
     # ex:
     [[[foo]]]
       profile = foo_profile
+      
+    [[[sp-0]]]
+      profile = sp_profile
+      command = source ~/users/amin/bashrc
+      command_delay = 1.0
+      # Send command before cd (default True). Set to False to cd first.
+      command_before_cd = True
 ```
 
 ## Debugging

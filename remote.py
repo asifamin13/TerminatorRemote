@@ -57,6 +57,7 @@ AUTHORS
 
 import os
 import time
+import glob
 import getopt
 import argparse
 import re
@@ -160,6 +161,13 @@ class DockerAPI(object):
         socket_urls.append("unix:///run/podman/podman.sock")
 
         for socket_url in socket_urls:
+            # For unix sockets, check file existence first to avoid
+            # expensive connection timeouts on missing sockets
+            if socket_url.startswith('unix://'):
+                socket_path = socket_url[len('unix://'):]
+                if not os.path.exists(socket_path):
+                    dbg(f"Socket file does not exist: {socket_path}")
+                    continue
             try:
                 client = docker_sdk.DockerClient(base_url=socket_url)
                 client.ping()
@@ -653,6 +661,10 @@ class Remote(MenuItem):
         # Proc watch poller
         self.remote_proc_watch = RemoteProcWatch(self.remote_session_types)
 
+        # Pre-connect to Docker/Podman API at plugin load time
+        # so the first right-click menu doesn't have a delay
+        DockerAPI.get_instance()._connect()
+
     def _isNewlySpawned(self, pid):
         create_time = self.remote_proc_watch.GetCreateTime(pid)
         if create_time is None:
@@ -690,7 +702,9 @@ class Remote(MenuItem):
             'auto_clone': "False",
             'infer_cwd': "True",
             'use_pwd': "False",
-            'container_shell': "sh"
+            'container_shell': "sh",
+            'ssh_config': "~/.ssh/config",
+            'cd_delay': "0.25"
         }
         user_config = Config().plugin_get_config(cls.__name__)
         dbg(f"read user config: {user_config}")
@@ -803,13 +817,111 @@ class Remote(MenuItem):
         dbg(f"Selection does not look like a path: '{text}'")
         return None
 
+    def _parse_ssh_config(self):
+        """
+        Parse ~/.ssh/config and return a list of host aliases.
+        Skips wildcard patterns like '*' or '*.example.com'.
+        Follows Include directives.
+        """
+        hosts = []
+        seen = set()
+
+        def parse_file(filepath):
+            try:
+                with open(os.path.expanduser(filepath), 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('#') or not line:
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            if parts[0].lower() == 'host':
+                                for host in parts[1:]:
+                                    # Skip wildcards and negation patterns
+                                    if '*' in host or '?' in host or host.startswith('!'):
+                                        continue
+                                    if host not in seen:
+                                        seen.add(host)
+                                        hosts.append(host)
+                            elif parts[0].lower() == 'include':
+                                # Follow Include directives
+                                include_path = os.path.expanduser(parts[1])
+                                for fpath in sorted(glob.glob(include_path)):
+                                    parse_file(fpath)
+
+            except FileNotFoundError:
+                dbg(f"SSH config file not found: {filepath}")
+            except Exception as e:
+                dbg(f"Error parsing SSH config {filepath}: {e}")
+
+        parse_file(self.config['ssh_config'])
+        hosts.sort()
+        return hosts
+
+    def _get_running_containers(self):
+        """
+        Get list of running containers via Docker/Podman API.
+        Returns list of (name, image) tuples, sorted by name.
+        """
+        api = DockerAPI.get_instance()
+        client = api._connect()
+        if not client:
+            return []
+
+        try:
+            containers = []
+            for container in client.containers.list():
+                name = container.attrs.get('Name', '').lstrip('/')
+                image = container.attrs.get('Config', {}).get('Image', '')
+                containers.append((name, image))
+            containers.sort(key=lambda x: x[0])
+            return containers
+        except Exception as e:
+            dbg(f"Error listing containers: {e}")
+            return []
+
+    def _send_delayed_command(self, vte, command, delay_ms):
+        """Send a command to the terminal after a delay"""
+        def send():
+            cmd = f"{command}\n"
+            dbg(f"Sending delayed command '{command}'")
+            vte.feed_child(cmd.encode())
+            return False  # run once
+        GLib.timeout_add(delay_ms, send)
+
+    def _ssh_to_host(self, terminal, host):
+        """Send ssh command to terminal, optionally followed by a post-connect command"""
+        vte = terminal.get_vte()
+        cmd = f"ssh {host}\n"
+        dbg(f"Sending '{cmd.strip()}' to terminal")
+        vte.feed_child(cmd.encode())
+
+        # Check host config for a post-connect command
+        host_config = self.config.get(host, {})
+        command = host_config.get('command', '')
+        if command:
+            delay = float(host_config.get('command_delay', 1.0))
+            dbg(f"Will send command '{command}' after {delay}s (host config for '{host}')")
+            self._send_delayed_command(vte, command, int(delay * 1000))
+
+    def _attach_to_container(self, terminal, name):
+        """Send exec command to terminal using configured shell, optionally followed by a post-connect command"""
+        vte = terminal.get_vte()
+        shell = self.config['container_shell']
+        cmd = f"podman exec -it {name} {shell}\n"
+        dbg(f"Sending '{cmd.strip()}' to terminal")
+        vte.feed_child(cmd.encode())
+
+        # Check container host config for a post-connect command
+        host_config = self.config.get(name, {})
+        command = host_config.get('command', '')
+        if command:
+            delay = float(host_config.get('command_delay', 1.0))
+            dbg(f"Will send command '{command}' after {delay}s (host config for '{name}')")
+            self._send_delayed_command(vte, command, int(delay * 1000))
+
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
-        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
-        if not ret:
-            return
-        child, remote_session = ret
-        dbg(f"Found remote session {child}")
 
         def get_image_menuitem(title, horiz):
             item = Gtk.ImageMenuItem.new_with_mnemonic(title)
@@ -822,7 +934,46 @@ class Remote(MenuItem):
             if hasattr(item, 'set_always_show_image'):
                 item.set_always_show_image(True)
             return item
-        
+
+        # Check for existing remote session
+        ret = self.remote_proc_watch.GetPIDProcInfo(terminal.pid)
+
+        if not ret:
+            # No remote session — show options to launch new sessions
+            ssh_hosts = self._parse_ssh_config()
+            containers = self._get_running_containers()
+
+            if ssh_hosts or containers:
+                menuitems.append(Gtk.SeparatorMenuItem())
+
+            if ssh_hosts:
+                ssh_menu = Gtk.Menu()
+                ssh_item = Gtk.MenuItem(_('SSH to Host'))
+                ssh_item.set_submenu(ssh_menu)
+                for host in ssh_hosts:
+                    host_item = Gtk.MenuItem(host)
+                    host_item.connect('activate', lambda w, h=host: self._ssh_to_host(terminal, h))
+                    ssh_menu.append(host_item)
+                ssh_menu.show_all()
+                menuitems.append(ssh_item)
+
+            if containers:
+                container_menu = Gtk.Menu()
+                container_item = Gtk.MenuItem(_('Attach to Container'))
+                container_item.set_submenu(container_menu)
+                for name, image in containers:
+                    label = f"{name} ({image})" if image else name
+                    c_item = Gtk.MenuItem(label)
+                    c_item.connect('activate', lambda w, n=name: self._attach_to_container(terminal, n))
+                    container_menu.append(c_item)
+                container_menu.show_all()
+                menuitems.append(container_item)
+
+            return
+
+        child, remote_session = ret
+        dbg(f"Found remote session {child}")
+
         # separator before clone commands
         menuitems.append(Gtk.SeparatorMenuItem())
         
@@ -1002,18 +1153,61 @@ class Remote(MenuItem):
         vte = terminal.get_vte()
         vte.feed_child(cmd.encode())
 
-        if self.remote_cwd in (None, "", "~"):
-            pass
-        else:
-            snippet = CD_CMD.format(
-                cwd=self.remote_cwd
-            ) + os.linesep
+        # Check host config for a post-connect command
+        remoteHost = self.remote_type.GetHost(self.remote_proc)
+        host_command = None
+        host_command_delay = 1.0
+        command_before_cd = True
+        if remoteHost and remoteHost in self.config:
+            host_config = self.config[remoteHost]
+            host_command = host_config.get('command', '')
+            host_command_delay = float(host_config.get('command_delay', 1.0))
+            command_before_cd = host_config.get('command_before_cd', 'true').lower() == 'true'
 
-            dbg(f"will send snippet '{snippet}' into new terminal")
+        has_cd = self.remote_cwd not in (None, "", "~")
+        cd_delay_ms = int(float(self.config['cd_delay']) * 1000)
+        command_delay_ms = int(host_command_delay * 1000)
+
+        if not has_cd:
+            # No cd to send — just schedule the post-connect command if any
+            if host_command:
+                dbg(f"Will send command '{host_command}' after {host_command_delay}s (host config for '{remoteHost}')")
+                self._send_delayed_command(vte, host_command, command_delay_ms)
+        elif command_before_cd and host_command:
+            # Command first, then cd
+            # 1. Wait command_delay → send command
+            # 2. Wait cd_delay → send cd
+            dbg(f"Will send command '{host_command}' after {host_command_delay}s, then cd after {cd_delay_ms}ms more (host config for '{remoteHost}')")
+            def send_command_then_cd():
+                vte.feed_child(f"{host_command}\n".encode())
+                snippet = CD_CMD.format(cwd=self.remote_cwd) + os.linesep
+                def send_cd():
+                    dbg(f"Sending cd after command")
+                    vte.feed_child(snippet.encode())
+                    return False
+                GLib.timeout_add(cd_delay_ms, send_cd)
+                return False
+            GLib.timeout_add(command_delay_ms, send_command_then_cd)
+        elif host_command:
+            # Cd first, then command
+            # 1. Wait cd_delay → send cd
+            # 2. Wait remaining command_delay → send command
+            snippet = CD_CMD.format(cwd=self.remote_cwd) + os.linesep
+            dbg(f"Will send cd after {cd_delay_ms}ms, then command '{host_command}' after {command_delay_ms}ms more (host config for '{remoteHost}')")
+            def send_cd_then_command():
+                vte.feed_child(snippet.encode())
+                remaining_delay = max(0, command_delay_ms - cd_delay_ms)
+                self._send_delayed_command(vte, host_command, remaining_delay)
+                return False
+            GLib.timeout_add(cd_delay_ms, send_cd_then_command)
+        else:
+            # Only cd, no command
+            snippet = CD_CMD.format(cwd=self.remote_cwd) + os.linesep
+            dbg(f"will send snippet '{snippet}' into new terminal after {cd_delay_ms}ms")
             def send_later():
                 vte.feed_child(snippet.encode())
-                return False # run once
-            GLib.timeout_add(250, send_later)
+                return False
+            GLib.timeout_add(cd_delay_ms, send_later)
 
         self._apply_host_settings(terminal)
 
