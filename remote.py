@@ -824,7 +824,10 @@ class Remote(MenuItem):
             if hasattr(item, 'set_always_show_image'):
                 item.set_always_show_image(True)
             return item
-
+        
+        # separator before clone commands
+        menuitems.append(Gtk.SeparatorMenuItem())
+        
         # if we have split-auto signal
         if APP_VERSION >= '2.1.3':
             item = Gtk.MenuItem.new_with_mnemonic(_('Clone Auto'))
