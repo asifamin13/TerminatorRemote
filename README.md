@@ -90,7 +90,7 @@ Start Terminator. In Right Click -> Preferences -> Plugins, enable Remote
 ## Configuration
 
 Plugin section in `~/.config/terminator/config` :
-```
+```toml
 [plugins]
   [[Remote]]
     # Automatically clone when you split a terminal with a remote session
