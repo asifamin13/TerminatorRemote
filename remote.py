@@ -359,7 +359,7 @@ class ContainerSession(RemoteSession):
             return info['working_dir']
         return None
 
-    def Clone(self, proc, workdir=None, shell=None):
+    def Clone(self, proc, shell=None):
         """ get cmd to launch terminal into container session """
         if shell is None:
             shell = 'sh'
@@ -368,13 +368,6 @@ class ContainerSession(RemoteSession):
             err("shouldnt happen?")
             return proc.cmdline()
         if cmd in ["exec" , "attach"]:
-            if workdir and cmd == "exec":
-                # Insert -w workdir into the existing exec command
-                result = list(proc.cmdline())
-                exec_idx = result.index('exec') + 1
-                result.insert(exec_idx, '-w')
-                result.insert(exec_idx + 1, workdir)
-                return result
             return proc.cmdline()
         # this is a docker run
         host = self.GetHost(proc)
@@ -384,10 +377,7 @@ class ContainerSession(RemoteSession):
             return proc.cmdline()
         else:
             # we should exec a terminal session here
-            clone_cmd = [self.exe, 'exec', '-it']
-            if workdir:
-                clone_cmd.extend(['-w', workdir])
-            clone_cmd.extend([host] + shell.split())
+            clone_cmd = [self.exe, 'exec', '-it', host] + shell.split()
             return clone_cmd
 
     def _get_command(self, proc):
@@ -1128,19 +1118,9 @@ class Remote(MenuItem):
 
     def _spawn_remote_session(self, terminal):
         """ spawn user session into terminal """
-        # For containers, use --workdir flag only when the user explicitly
-        # chose a CWD (via regex, pwd, or selection). Don't fall back to
-        # the API's WorkingDir — the container is already running in its
-        # working directory and the API value may not actually exist.
-        workdir = None
-        if isinstance(self.remote_type, ContainerSession):
-            if self.remote_cwd:
-                workdir = self.remote_cwd
-
         if isinstance(self.remote_type, ContainerSession):
             remote_cmd = self.remote_type.Clone(
                 self.remote_proc,
-                workdir=workdir,
                 shell=self.config['container_shell']
             )
         else:
