@@ -42,7 +42,8 @@ in your SSH config.
 
 A submenu listing all running containers (via the Docker/Podman API). Each entry
 shows the container name and image. Clicking a container sends
-`podman exec -it <name> <shell>` to the terminal, using the `container_shell` config.
+`<container_command> exec -it <name> <shell>` to the terminal, using the
+`container_command` and `container_shell` config options.
 
 Only shown when the Docker/Podman API is available.
 
@@ -63,10 +64,11 @@ can use the Docker/Podman API for enhanced container support:
   of sending a `cd` command after spawning
 
 The plugin tries these API sockets in order:
-1. `DOCKER_HOST` environment variable (if set)
-2. Rootless Podman: `unix:///run/user/{uid}/podman/podman.sock`
-3. Docker: `unix:///var/run/docker.sock`
-4. System Podman: `unix:///run/podman/podman.sock`
+1. `socket_path` config option (if set)
+2. `DOCKER_HOST` environment variable (if set)
+3. Rootless Podman: `unix:///run/user/{uid}/podman/podman.sock`
+4. Docker: `unix:///var/run/docker.sock`
+5. System Podman: `unix:///run/podman/podman.sock`
 
 If the SDK is not installed or no socket is available, the plugin falls back
 to the existing psutil-based cmdline parsing — no functionality is lost.
@@ -99,6 +101,16 @@ Plugin section in `~/.config/terminator/config` :
     # When a terminal with a remote session is cloned, attempt to parse the
     # current working directory via the PS1 and 'cd' into it
     infer_cwd = True
+
+    # SSH executable to use when connecting from the menu (default "ssh")
+    ssh_command = ssh
+
+    # Container runtime executable to use when attaching from the menu (default "docker")
+    container_command = docker
+
+    # Explicit socket path for Docker/Podman API (default: auto-detect)
+    # Set to a unix socket path to skip auto-detection, e.g.:
+    # socket_path = /run/user/1000/podman/podman.sock
 
     # Shell to use when cloning into a container (e.g. "bash --login", "zsh")
     container_shell = sh

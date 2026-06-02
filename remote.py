@@ -26,6 +26,9 @@ CONFIGURATION
       * infer_cwd: When a session is cloned, attempt to `cd` into working directory
       * ssh_default_profile: optional profile to apply to all SSH sessions
       * container_default_profile: optional profile to apply to all container sessions
+      * ssh_command: SSH executable to use (default "ssh")
+      * container_command: Container runtime executable to use (default "docker")
+      * socket_path: Optional Docker/Podman API socket path (default: auto-detect)
 
     Host section:
       You can add host sections with a 'profile' key which will override the defaults
@@ -132,6 +135,7 @@ class DockerAPI(object):
     def __init__(self):
         self._client = None
         self._tried_connect = False
+        self.socket_path = None
 
     def _connect(self):
         """Try to connect to Docker/Podman API socket"""
@@ -145,6 +149,12 @@ class DockerAPI(object):
 
         uid = os.getuid()
         socket_urls = []
+
+        # If a specific socket path is configured, try it first
+        if self.socket_path:
+            expanded = os.path.expanduser(self.socket_path)
+            socket_url = f"unix://{expanded}" if not expanded.startswith('unix://') else expanded
+            socket_urls.append(socket_url)
 
         # Respect DOCKER_HOST env var if set
         docker_host = os.environ.get('DOCKER_HOST', '')
@@ -344,19 +354,6 @@ class ContainerSession(RemoteSession):
             dbg(f"proc has gone away: {e}")
         except Exception as e:
             err(f"caught exception {e}")
-        return None
-
-    def GetWorkingDir(self, proc):
-        """
-        Try to get the container's working directory via the Docker API.
-        Returns the working dir string or None.
-        """
-        name = self.GetHost(proc)
-        if not name:
-            return None
-        info = DockerAPI.get_instance().get_container_info(name)
-        if info and info.get('working_dir'):
-            return info['working_dir']
         return None
 
     def Clone(self, proc, shell=None):
@@ -653,7 +650,11 @@ class Remote(MenuItem):
 
         # Pre-connect to Docker/Podman API at plugin load time
         # so the first right-click menu doesn't have a delay
-        DockerAPI.get_instance()._connect()
+        api = DockerAPI.get_instance()
+        socket_path = self.config.get('socket_path', '')
+        if socket_path:
+            api.socket_path = socket_path
+        api._connect()
 
     def _isNewlySpawned(self, pid):
         create_time = self.remote_proc_watch.GetCreateTime(pid)
@@ -694,7 +695,10 @@ class Remote(MenuItem):
             'use_pwd': "False",
             'container_shell': "sh",
             'ssh_config': "~/.ssh/config",
-            'cd_delay': "0.25"
+            'cd_delay': "0.25",
+            'ssh_command': "ssh",
+            'container_command': "docker",
+            'socket_path': ""
         }
         user_config = Config().plugin_get_config(cls.__name__)
         dbg(f"read user config: {user_config}")
@@ -882,7 +886,8 @@ class Remote(MenuItem):
     def _ssh_to_host(self, terminal, host):
         """Send ssh command to terminal, optionally followed by a post-connect command"""
         vte = terminal.get_vte()
-        cmd = f"ssh {host}\n"
+        ssh_exe = self.config['ssh_command']
+        cmd = f"{ssh_exe} {host}\n"
         dbg(f"Sending '{cmd.strip()}' to terminal")
         vte.feed_child(cmd.encode())
 
@@ -898,7 +903,8 @@ class Remote(MenuItem):
         """Send exec command to terminal using configured shell, optionally followed by a post-connect command"""
         vte = terminal.get_vte()
         shell = self.config['container_shell']
-        cmd = f"podman exec -it {name} {shell}\n"
+        container_exe = self.config['container_command']
+        cmd = f"{container_exe} exec -it {name} {shell}\n"
         dbg(f"Sending '{cmd.strip()}' to terminal")
         vte.feed_child(cmd.encode())
 
