@@ -64,16 +64,13 @@ import glob
 import getopt
 import argparse
 import re
+import json
+import socket
+import http.client
 import psutil
 import asyncio
 import threading
 from typing import Optional, List
-
-try:
-    import docker as docker_sdk
-    HAS_DOCKER_SDK = True
-except ImportError:
-    HAS_DOCKER_SDK = False
 
 import gi
 from gi.repository import Gtk, GLib, Gdk
@@ -116,12 +113,25 @@ def vte_get_text(vte_term, start_row, start_col, end_row, end_col):
         end_col=end_col
     )[0]
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """ http.client connection over a unix domain socket """
+    def __init__(self, socket_path, timeout=2):
+        super().__init__('localhost', timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+
 class DockerAPI(object):
     """
-    Optional Docker/Podman API integration for enhanced container info.
-    Falls back gracefully when the Docker SDK is not installed or the
-    API socket is not accessible. Works with both Docker and Podman
-    (Podman exposes a Docker-compatible API socket).
+    Minimal Docker/Podman REST API client over a unix socket using only
+    the standard library — no docker SDK dependency. Works with both
+    Docker and Podman (Podman exposes a Docker-compatible API socket).
+    Falls back gracefully when no API socket is accessible.
     """
     _instance = None
 
@@ -133,83 +143,130 @@ class DockerAPI(object):
         return cls._instance
 
     def __init__(self):
-        self._client = None
+        self._socket = None  # path of the working socket
         self._tried_connect = False
         self.socket_path = None
 
-    def _connect(self):
-        """Try to connect to Docker/Podman API socket"""
-        if self._tried_connect:
-            return self._client
-        self._tried_connect = True
-
-        if not HAS_DOCKER_SDK:
-            dbg("Docker SDK not installed, skipping API integration")
-            return None
-
+    @staticmethod
+    def _candidate_sockets(configured):
+        """ ordered list of socket paths to try """
         uid = os.getuid()
-        socket_urls = []
+        candidates = []
 
         # If a specific socket path is configured, try it first
-        if self.socket_path:
-            expanded = os.path.expanduser(self.socket_path)
-            socket_url = f"unix://{expanded}" if not expanded.startswith('unix://') else expanded
-            socket_urls.append(socket_url)
+        if configured:
+            expanded = os.path.expanduser(configured)
+            if expanded.startswith('unix://'):
+                expanded = expanded[len('unix://'):]
+            candidates.append(expanded)
 
-        # Respect DOCKER_HOST env var if set
+        # Respect DOCKER_HOST env var if set (unix sockets only)
         docker_host = os.environ.get('DOCKER_HOST', '')
-        if docker_host:
-            socket_urls.append(docker_host)
+        if docker_host.startswith('unix://'):
+            candidates.append(docker_host[len('unix://'):])
+        elif docker_host:
+            dbg(f"DOCKER_HOST '{docker_host}' is not a unix socket, skipping")
 
         # Rootless Podman (most common for personal workstations)
-        socket_urls.append(f"unix:///run/user/{uid}/podman/podman.sock")
+        candidates.append(f"/run/user/{uid}/podman/podman.sock")
 
         # Docker socket
-        socket_urls.append("unix:///var/run/docker.sock")
+        candidates.append("/var/run/docker.sock")
 
         # System Podman socket
-        socket_urls.append("unix:///run/podman/podman.sock")
+        candidates.append("/run/podman/podman.sock")
 
-        for socket_url in socket_urls:
-            # For unix sockets, check file existence first to avoid
-            # expensive connection timeouts on missing sockets
-            if socket_url.startswith('unix://'):
-                socket_path = socket_url[len('unix://'):]
-                if not os.path.exists(socket_path):
-                    dbg(f"Socket file does not exist: {socket_path}")
-                    continue
-            try:
-                client = docker_sdk.DockerClient(base_url=socket_url)
-                client.ping()
-                dbg(f"Connected to container API at {socket_url}")
-                self._client = client
-                return self._client
-            except Exception as e:
-                dbg(f"Could not connect to {socket_url}: {e}")
+        return candidates
+
+    def _request(self, path):
+        """ GET `path` from the API socket, return (status, body) or None """
+        if not self._socket:
+            return None
+        conn = UnixHTTPConnection(self._socket)
+        try:
+            conn.request('GET', path)
+            resp = conn.getresponse()
+            return resp.status, resp.read()
+        except Exception as e:
+            dbg(f"API request {path} failed: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def _get_json(self, path):
+        """ GET `path` and parse the JSON body, or None on any failure """
+        ret = self._request(path)
+        if not ret:
+            return None
+        status, body = ret
+        if status != 200:
+            dbg(f"API request {path} returned status {status}")
+            return None
+        try:
+            return json.loads(body)
+        except ValueError as e:
+            dbg(f"bad JSON from {path}: {e}")
+            return None
+
+    def _connect(self):
+        """
+        Find a working Docker/Podman API socket.
+        Returns self when an API is available, else None (so callers can
+        keep the `if not api._connect()` guard pattern).
+        """
+        if self._tried_connect:
+            return self if self._socket else None
+        self._tried_connect = True
+
+        for sock_path in self._candidate_sockets(self.socket_path):
+            # check file existence first to avoid connection timeouts
+            if not os.path.exists(sock_path):
+                dbg(f"Socket file does not exist: {sock_path}")
+                continue
+            self._socket = sock_path
+            ret = self._request('/_ping')
+            if ret and ret[0] == 200:
+                dbg(f"Connected to container API at {sock_path}")
+                return self
+            self._socket = None
 
         dbg("No container API socket available")
         return None
 
+    def list_containers(self):
+        """
+        List running containers via GET /containers/json.
+        Returns list of dicts with 'name', 'image', 'created' keys
+        ('created' is a unix timestamp int, suitable for sorting).
+        """
+        data = self._get_json('/containers/json')
+        if data is None:
+            return []
+        containers = []
+        for c in data:
+            names = c.get('Names') or []
+            name = names[0].lstrip('/') if names else c.get('Id', '')[:12]
+            containers.append({
+                'name': name,
+                'image': c.get('Image', ''),
+                'created': c.get('Created', 0),
+            })
+        return containers
+
     def get_container_info(self, name_or_id):
         """
-        Get container info by name or ID.
+        Inspect a container via GET /containers/{name}/json.
         Returns dict with 'name', 'working_dir' keys, or None if not found.
         """
-        client = self._connect()
-        if not client:
+        attrs = self._get_json(f'/containers/{name_or_id}/json')
+        if attrs is None:
             return None
-        try:
-            container = client.containers.get(name_or_id)
-            attrs = container.attrs
-            info = {
-                'name': attrs.get('Name', '').lstrip('/'),
-                'working_dir': attrs.get('Config', {}).get('WorkingDir', ''),
-            }
-            dbg(f"Got container info via API: {info}")
-            return info
-        except Exception as e:
-            dbg(f"Container '{name_or_id}' not found via API: {e}")
-            return None
+        info = {
+            'name': attrs.get('Name', '').lstrip('/'),
+            'working_dir': attrs.get('Config', {}).get('WorkingDir', ''),
+        }
+        dbg(f"Got container info via API: {info}")
+        return info
 
 
 class RemoteSession(object):
@@ -409,18 +466,14 @@ class ContainerSession(RemoteSession):
 
         # Fall back to Docker/Podman API — pick most recently created container
         api = DockerAPI.get_instance()
-        client = api._connect()
-        if not client:
+        if not api._connect():
             dbg("No API available to find run container name")
             return None
 
         try:
-            candidates = []
-            for container in client.containers.list():
-                container_name = container.attrs.get('Name', '').lstrip('/')
-                container_created = container.attrs.get('Created', '')
-                candidates.append((container_name, container_created))
-
+            candidates = [
+                (c['name'], c['created']) for c in api.list_containers()
+            ]
             if candidates:
                 # Sort by creation time, pick the most recently created
                 candidates.sort(key=lambda x: x[1], reverse=True)
@@ -880,16 +933,13 @@ class Remote(MenuItem):
         Returns list of (name, image) tuples, sorted by name.
         """
         api = DockerAPI.get_instance()
-        client = api._connect()
-        if not client:
+        if not api._connect():
             return []
-
+        
         try:
-            containers = []
-            for container in client.containers.list():
-                name = container.attrs.get('Name', '').lstrip('/')
-                image = container.attrs.get('Config', {}).get('Image', '')
-                containers.append((name, image))
+            containers = [
+                (c['name'], c['image']) for c in api.list_containers()
+            ]
             containers.sort(key=lambda x: x[0])
             return containers
         except Exception as e:
