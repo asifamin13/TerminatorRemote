@@ -332,7 +332,6 @@ class ContainerSession(RemoteSession):
         """ check if this is a running docker session """
         if not self.matches_by_name(proc):
             return False
-        dbg(f"checking cmdline: {proc.cmdline()}")
         # make sure this is an interactive run, exec, or attach
         return self._get_command(proc) != None
 
@@ -456,7 +455,7 @@ class ContainerSession(RemoteSession):
         fullArgs = proc.cmdline()
         startIndex = fullArgs.index('exec') + 1
         args, unknown = self._exec_parser.parse_known_args(fullArgs[startIndex:])
-        dbg(f"got args: {args}, unknown: {unknown}")
+        # dbg(f"got args: {args}, unknown: {unknown}")
         return args.container
 
     def _get_host_attach(self, proc):
@@ -485,7 +484,7 @@ class ContainerSession(RemoteSession):
         fullArgs = proc.cmdline()
         startIndex = fullArgs.index('attach') + 1
         args, unknown = self._attach_parser.parse_known_args(fullArgs[startIndex:])
-        dbg(f"got args: {args}, unknown: {unknown}")
+        # dbg(f"got args: {args}, unknown: {unknown}")
         return args.container
 
 class RemoteProcWatch(object):
@@ -501,8 +500,8 @@ class RemoteProcWatch(object):
         self._lock = threading.Lock()
 
         self.quit = False
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._external_thread, daemon=True)
+        self.loop = None
+        self.thread = None
 
     def _has_remote_session(self, pid):
         """ check if this PID has a direct child with remote session """
@@ -538,9 +537,21 @@ class RemoteProcWatch(object):
                 self.create_times[pid] = psutil.Process(pid).create_time()
             except psutil.NoSuchProcess:
                 self.create_times[pid] = None
-        # start poll thread if not yet started
-        if not self.thread.is_alive():
-            self.thread.start()
+        self._ensure_thread()
+
+    def _ensure_thread(self):
+        """
+        (re)start the poll thread if it isn't running.
+        A threading.Thread object can only be started once, so if a
+        previous poller exited (all watches were removed), build a
+        fresh loop + thread instead of calling start() again.
+        """
+        if self.thread is not None and self.thread.is_alive():
+            return
+        self.quit = False
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._external_thread, daemon=True)
+        self.thread.start()
 
     def GetPIDProcInfo(self, pid):
         """ get current remote proc info """
@@ -598,6 +609,11 @@ class RemoteProcWatch(object):
 class Remote(MenuItem):
     """
     Add remote commands to the terminal menu
+
+    NOTE: Terminator can instantiate this plugin multiple times (e.g. each
+    time the terminal context menu is built). All long-lived state is kept
+    on the class so every instance shares one RemoteProcWatch poller, one
+    GLib watch timer, and one terminal->profile tracking dict.
     """
     capabilities = ['terminal_menu']
 
@@ -607,8 +623,15 @@ class Remote(MenuItem):
         ContainerSession('podman')
     ]
 
+    # ---- shared (class-level) state, singletons across plugin instances ----
     # global plugin config
     config = None
+    # single proc watch poller shared by all instances
+    remote_proc_watch = None
+    # current terminals with a remote session found via polling
+    currRemoteTerminals = dict() # terminal -> last profile
+    # single GLib watch timer shared by all instances
+    watch_id = None
 
     # I hate using regex, got this from ChatGPT 3.5
     # This should try to match a sane linux file path that can
@@ -620,6 +643,7 @@ class Remote(MenuItem):
     def __init__(self):
         """ constructor """
         MenuItem.__init__(self)
+        dbg("Remote instance created")
 
         if not Remote.config:
             Remote.config = Remote.get_config()
@@ -628,33 +652,31 @@ class Remote(MenuItem):
         self.terminator = Terminator()
 
         # current terminal instance data
-        # from context menu
         self.peers = set()
         self.remote_proc = None
         self.remote_type = None
         self.remote_cwd = None
-
-        # current terminals with a remote session found via polling
-        self.currRemoteTerminals = dict() # terminal -> last profile
-
-        # timer callbacks
         self.timeout_id = None
-        self.watch_id = GLib.timeout_add(
-            0.5 * 1000,
-            self._update_watches,
-            None
-        )
 
-        # Proc watch poller
-        self.remote_proc_watch = RemoteProcWatch(self.remote_session_types)
+        # Proc watch poller — create exactly once
+        if Remote.remote_proc_watch is None:
+            Remote.remote_proc_watch = RemoteProcWatch(self.remote_session_types)
 
-        # Pre-connect to Docker/Podman API at plugin load time
-        # so the first right-click menu doesn't have a delay
-        api = DockerAPI.get_instance()
-        socket_path = self.config.get('socket_path', '')
-        if socket_path:
-            api.socket_path = socket_path
-        api._connect()
+        # Watch timer + one-time API pre-connect — install exactly once
+        if Remote.watch_id is None:
+            Remote.watch_id = GLib.timeout_add(
+                500,
+                self._update_watches,
+                None
+            )
+
+            # Pre-connect to Docker/Podman API at plugin load time
+            # so the first right-click menu doesn't have a delay
+            api = DockerAPI.get_instance()
+            socket_path = self.config.get('socket_path', '')
+            if socket_path:
+                api.socket_path = socket_path
+            api._connect()
 
     def _isNewlySpawned(self, pid):
         create_time = self.remote_proc_watch.GetCreateTime(pid)
@@ -1213,6 +1235,15 @@ class Remote(MenuItem):
         remote_proc = self.remote_proc if proc is None else proc
         remote_type = self.remote_type if proc_type is None else proc_type
 
+        # Guard: skip if process is terminated
+        try:
+            if remote_proc.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                dbg(f"Process {remote_proc.pid} is {remote_proc.status()}, skipping host settings")
+                return
+        except psutil.NoSuchProcess:
+            dbg(f"Process {remote_proc.pid} no longer exists, skipping host settings")
+            return
+
         profile = self._get_default_profile(remote_type)
         if not profile:
             dbg("no default profile specified in config")
@@ -1221,15 +1252,19 @@ class Remote(MenuItem):
         if not remoteHost:
             dbg(f"cannot determine host for proc {remote_proc}")
         elif remoteHost not in self.config:
-            dbg(f"no host entry for {remoteHost}")
+            # dbg(f"no host entry for {remoteHost}")
+            pass
         else:
             hostSettings = self.config[remoteHost]
             if 'profile' in hostSettings:
                 profile = hostSettings['profile']
-            else:
-                dbg(f"no profile entry for {remoteHost}")
+            # else:
+            #     dbg(f"no profile entry for {remoteHost}")
         if not profile:
             dbg("cant find a profile in config")
+            # Still track this terminal so we don't re-process it every poll cycle
+            if terminal not in self.currRemoteTerminals:
+                self.currRemoteTerminals[terminal] = terminal.get_profile()
             return
         if terminal.get_profile() != profile:
             dbg(f"applying profile: {profile}")
