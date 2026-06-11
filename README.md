@@ -38,6 +38,9 @@ A submenu listing all hosts from `~/.ssh/config` (skipping wildcard patterns).
 Clicking a host sends `ssh <host>` to the terminal. Supports `Include` directives
 in your SSH config.
 
+If a host has a `command` configured (see below), it will also be sent after
+connecting — whether you use the dropdown menu **or manually type** `ssh <host>`.
+
 ## Attach to Container
 
 A submenu listing all running containers (via the Docker/Podman API). Each entry

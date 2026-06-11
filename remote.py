@@ -683,6 +683,9 @@ class Remote(MenuItem):
     remote_proc_watch = None
     # current terminals with a remote session found via polling
     currRemoteTerminals = dict() # terminal -> last profile
+    # terminals that have already received a host command (prevents double-sending
+    # when the dropdown menu already scheduled one before the poller detects it)
+    sent_host_commands = set()
     # single GLib watch timer shared by all instances
     watch_id = None
 
@@ -752,11 +755,13 @@ class Remote(MenuItem):
                         proc=child,
                         proc_type=remoteType
                     )
+                    self._send_host_command(terminal, child, remoteType)
             else:
                 if terminal in self.currRemoteTerminals and not self._isNewlySpawned(terminal.pid):
                     dbg(f"restoring original profile: {self.currRemoteTerminals[terminal]}")
                     terminal.set_profile(None, profile=self.currRemoteTerminals[terminal])
                     self.currRemoteTerminals.pop(terminal)
+                    Remote.sent_host_commands.discard(terminal)
         return True
 
     @classmethod
@@ -955,6 +960,44 @@ class Remote(MenuItem):
             return False  # run once
         GLib.timeout_add(delay_ms, send)
 
+    def _send_host_command(self, terminal, child, remote_session):
+        """
+        Send the configured host command when a manually-started remote
+        session is first detected by the poller. This covers the case where
+        the user types `ssh foo` or `docker exec ...` directly instead of
+        using the dropdown menu.
+
+        Uses sent_host_commands to avoid double-sending when the dropdown
+        menu (or clone) already scheduled the command before the poller
+        detected the remote session.
+        """
+        if terminal in Remote.sent_host_commands:
+            dbg(f"Host command already sent or scheduled for this terminal, skipping")
+            return
+
+        try:
+            if child.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                dbg(f"Process {child.pid} is {child.status()}, skipping host command")
+                return
+        except psutil.NoSuchProcess:
+            dbg(f"Process {child.pid} no longer exists, skipping host command")
+            return
+
+        remoteHost = remote_session.GetHost(child)
+        if not remoteHost:
+            dbg("cannot determine host for manually-started session, skipping command")
+            return
+        host_config = self.config.get(remoteHost, {})
+        command = host_config.get('command', '')
+        if not command:
+            return
+
+        delay = float(host_config.get('command_delay', 1.0))
+        vte = terminal.get_vte()
+        dbg(f"Manually-started session detected for '{remoteHost}', will send command '{command}' after {delay}s")
+        Remote.sent_host_commands.add(terminal)
+        self._send_delayed_command(vte, command, int(delay * 1000))
+
     def _ssh_to_host(self, terminal, host):
         """Send ssh command to terminal, optionally followed by a post-connect command"""
         vte = terminal.get_vte()
@@ -970,6 +1013,8 @@ class Remote(MenuItem):
             delay = float(host_config.get('command_delay', 1.0))
             dbg(f"Will send command '{command}' after {delay}s (host config for '{host}')")
             self._send_delayed_command(vte, command, int(delay * 1000))
+            # Mark as sent so the poller doesn't double-send when it detects the SSH process
+            Remote.sent_host_commands.add(terminal)
 
     def _attach_to_container(self, terminal, name):
         """Send exec command to terminal using configured shell, optionally followed by a post-connect command"""
@@ -987,6 +1032,8 @@ class Remote(MenuItem):
             delay = float(host_config.get('command_delay', 1.0))
             dbg(f"Will send command '{command}' after {delay}s (host config for '{name}')")
             self._send_delayed_command(vte, command, int(delay * 1000))
+            # Mark as sent so the poller doesn't double-send when it detects the container process
+            Remote.sent_host_commands.add(terminal)
 
     def callback(self, menuitems, menu, terminal):
         """ Add our menu items to the menu """
@@ -1266,6 +1313,10 @@ class Remote(MenuItem):
                 vte.feed_child(snippet.encode())
                 return False
             GLib.timeout_add(cd_delay_ms, send_later)
+
+        # Mark as sent so the poller doesn't double-send when it detects the cloned session
+        if host_command:
+            Remote.sent_host_commands.add(terminal)
 
         self._apply_host_settings(terminal)
 
