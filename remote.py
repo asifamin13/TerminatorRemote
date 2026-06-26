@@ -308,13 +308,86 @@ class RemoteSession(object):
 
 class SSHSession(RemoteSession):
     """ SSH sessions """
+    # executables that spawn ssh as a non-interactive transport
+    _transport_parents = {
+        'rsync', 'scp', 'sftp', 'sftp-server', 'rsync-ssl',
+        'git-remote-ssh', 'git-lfs', 'svn', 'unison'
+    }
+    # https://github.com/openssh/openssh-portable/blob/99a2df5e1994cdcb44ba2187b5f34d0e9190be91/ssh.c#L713
+    # while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+    #     "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy")) != -1) { /* HUZdhjruz */
+    _ssh_short_opts = (
+        "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+        "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy"
+    )
+
     def __init__(self, exe='ssh'):
         """ constructor """
         RemoteSession.__init__(self, exe)
 
+    @classmethod
+    def _parse_ssh_args(cls, proc):
+        """
+        Parse ssh cmdline into (opts, args) using getopt.
+        Returns (opts, args) or (None, None) on error.
+        opts is a list of (option, value) tuples; args is the list of
+        positional arguments (host, optional remote command, ...).
+        """
+        try:
+            ssh_args = proc.cmdline()[1:]
+            opts, args = getopt.getopt(ssh_args, cls._ssh_short_opts)
+            return opts, args
+        except psutil.NoSuchProcess:
+            dbg("proc has gone away")
+        except Exception as e:
+            dbg(f"caught error parsing ssh args: {e}")
+        return None, None
+
     def IsType(self, proc):
-        """ check if this is an ssh session """
-        return self.matches_by_name(proc)
+        """ check if this is an interactive ssh session """
+        if not self.matches_by_name(proc):
+            return False
+        return not self._is_transport_ssh(proc)
+
+    def _is_transport_ssh(self, proc):
+        """
+        Detect non-interactive ssh processes used as transport by
+        rsync/scp/sftp/etc. so we don't treat them as interactive sessions.
+
+        Signals that this ssh is transport (not a session to track):
+          * parent process is a known file-transfer tool, OR
+          * ssh was given a remote command (positional args after the host)
+            without a -t/--force-tty flag
+        """
+        try:
+            # Parent process check — rsync/scp/sftp all spawn ssh as a child
+            parent = proc.parent()
+            if parent is not None:
+                pname = parent.name()
+                if pname in self._transport_parents:
+                    dbg(f"ssh proc {proc.pid} has transport parent '{pname}', skipping")
+                    return True
+
+            # Remote-command check: parse the ssh cmdline.
+            # If there are positional args beyond the host AND no -t was requested,
+            # this is a non-interactive one-shot (e.g. `ssh host "ls"`, rsync's
+            # `ssh host rsync --server ...`).
+            opts, args = self._parse_ssh_args(proc)
+            if opts is None:
+                # parse failed (proc gone or bad cmdline) — assume transport to
+                # be safe and avoid injecting into something we can't understand
+                return True
+            has_tty = any(o == '-t' for o, _ in opts)
+            if not has_tty and len(args) > 1:
+                dbg(f"ssh proc {proc.pid} has remote command without -t, treating as transport")
+                return True
+        except psutil.NoSuchProcess:
+            dbg("proc has gone away during transport check")
+            return True
+        except Exception as e:
+            dbg(f"error during transport check, assuming not transport: {e}")
+            return False
+        return False
 
     def GetHost(self, proc):
         """
@@ -324,22 +397,10 @@ class SSHSession(RemoteSession):
             if '@' in target:
                 return target.split('@')[1]
             return target
-        # https://github.com/openssh/openssh-portable/blob/99a2df5e1994cdcb44ba2187b5f34d0e9190be91/ssh.c#L713
-        # while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
-        #     "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy")) != -1) { /* HUZdhjruz */
-        shortOpts = (
-            "1246ab:c:e:fgi:kl:m:no:p:qstvx"
-            "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy"
-        )
 
-        try:
-            ssh_args = proc.cmdline()[1:]
-            _, args = getopt.getopt(ssh_args, shortOpts)
+        opts, args = self._parse_ssh_args(proc)
+        if args:
             return extractHost(args[0])
-        except psutil.NoSuchProcess as e:
-            dbg("proc has gone away")
-        except Exception as e:
-            dbg(f"caught error: {e}")
         return None
 
     def Clone(self, proc):
