@@ -1,11 +1,31 @@
 """
 NAME
-    remote.py - Add support for remote sessions like ssh and docker/podman
+    remote.py - A Terminator plugin adding ssh and docker/podman features to
+    the context menu
 
 DESCRIPTION
-    This plugin will look for a child remote session inside terminal using the
-    psutil API and provide mechanisms in the context menu to clone session into
-    a new terminal and/or change profiles based on the remote type or host.
+    This plugin looks for a child remote session inside a terminal using the
+    psutil API and adds context-menu mechanisms to:
+
+      * Clone the current SSH/container session into a newly spawned terminal
+        (horizontally or vertically). By default the CWD is inferred by
+        regex-matching the PS1 in the scrollback.
+      * Clone into a highlighted path: if a file path is selected before right
+        clicking, "Clone Horizontally/Vertically into /the/path" items appear
+        that `cd` directly into the highlighted path, no PS1/pwd detection.
+      * Use pwd for CWD: a menu toggle that sends `pwd` to the remote shell to
+        determine the working directory instead of regex-matching the PS1. The
+        remote shell must be idle; uncheck it while a command is running.
+      * SSH to Host: a submenu listing hosts from ~/.ssh/config (skipping
+        wildcard patterns, honoring `Include` directives) that sends
+        `ssh <host>` to the terminal. If a host has a `command` configured (see
+        below) it is sent after connecting, whether the host is selected from
+        the menu or typed manually.
+      * Attach to Container: a submenu of running containers (via the
+        Docker/Podman API) that sends `<container_command> exec -it <name>
+        <container_shell>` to the terminal. Only shown when the API is
+        available.
+      * Apply a terminator profile based on the remote host or container name.
 
     Cloning sessions inspired from https://github.com/ilgarm/terminator_plugins
       * Not maintained anymore
@@ -13,25 +33,57 @@ DESCRIPTION
     Host profile matching inspired from https://github.com/GratefulTony/TerminatorHostWatch
       * This finds hosts by parsing the PS1 using a regex
 
+DOCKER/PODMAN API INTEGRATION
+    The plugin talks to the Docker/Podman API directly over its unix socket
+    using only the Python standard library -- no `docker` SDK or extra
+    dependencies required. When an API socket is available it provides enhanced
+    container support: the container working directory is detected via the
+    `/inspect` endpoint (so `cd` is more reliable) and container clones use
+    `docker exec -w /path` instead of sending a `cd` command afterwards.
+
+    API sockets are tried in order:
+      1. `socket_path` config option (if set)
+      2. `DOCKER_HOST` environment variable (if set)
+      3. Rootless Podman: unix:///run/user/{uid}/podman/podman.sock
+      4. Docker: unix:///var/run/docker.sock
+      5. System Podman: unix:///run/podman/podman.sock
+
+    If no socket is available, the plugin falls back to the existing
+    psutil-based cmdline parsing -- no functionality is lost.
+    Podman users enable the socket with: systemctl --user start podman.socket
+
 INSTALLATION
     Put this file in ~/.config/terminator/plugins/
+    Start Terminator and enable Remote in
+    Right Click -> Preferences -> Plugins
 
 CONFIGURATION
-    Plugin section in ~/.config/terminator/config
+    Plugin section in ~/.config/terminator/config:
     [plugins]
       [[Remote]]
 
     Configuration keys:
-      * auto_clone: Clone automatically when you split a remote session
-      * infer_cwd: When a session is cloned, attempt to `cd` into working directory
-      * ssh_default_profile: optional profile to apply to all SSH sessions
-      * container_default_profile: optional profile to apply to all container sessions
-      * ssh_command: SSH executable to use (default "ssh")
-      * container_command: Container runtime executable to use (default "docker")
+      * auto_clone: Clone automatically when you split a remote session (False)
+      * infer_cwd: When cloned, parse CWD from PS1 and `cd` into it (True)
+      * use_pwd: When set (via menu toggle), send `pwd` to the remote shell to
+        determine CWD instead of regex-matching the PS1 (False)
+      * ssh_command: SSH executable to use ("ssh")
+      * container_command: Container runtime executable to use ("docker")
+      * container_shell: Shell used when cloning into a container ("sh")
+      * ssh_config: Path to SSH config file, supports ~ expansion ("~/.ssh/config")
+      * cd_delay: Delay in seconds before sending cd after clone (0.25)
+      * ssh_default_profile: optional profile for all SSH sessions
+      * container_default_profile: optional profile for all container sessions
       * socket_path: Optional Docker/Podman API socket path (default: auto-detect)
 
     Host section:
-      You can add host sections with a 'profile' key which will override the defaults
+      You can add host sections (the host name from SSH config or the container
+      name) with a 'profile' key which overrides the defaults, and optionally a
+      'command' sent after connecting. Per-host keys:
+      * profile: terminator profile to apply for this host
+      * command: command sent to the remote shell after connecting
+      * command_delay: seconds to wait before sending the command (1.0)
+      * command_before_cd: send the command before cd (True); False cd's first
 
     ex)
 
@@ -40,18 +92,25 @@ CONFIGURATION
         ssh_default_profile = common_ssh_profile
         container_default_profile = common_docker_profile
         auto_clone = False
+        infer_cwd = True
+        container_shell = sh
+        cd_delay = 0.25
+        ssh_config = ~/.ssh/config
         [[[foo]]]
           profile = foo_profile
-        [[[bar]]]
-          profile = bar_profile
+        [[[sp-0]]]
+          profile = sp_profile
+          command = source ~/users/amin/bashrc
+          command_delay = 1.0
+          command_before_cd = True
 
 DEBUGGING
     To debug, start Terminator from another terminal emulator like so:
 
-    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch -u
+    $ terminator -d --debug-classes Remote,SSHSession,ContainerSession,RemoteProcWatch,DockerAPI -u
 
 DEVELOPMENT
-    support for future types of "Remote Sessions" can be easily added by
+    Support for future types of "Remote Sessions" can be easily added by
     subclassing `RemoteSession` and appending an instance to `Remote.remote_session_types`
 
 AUTHORS

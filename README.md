@@ -58,11 +58,12 @@ Inspired by https://github.com/GratefulTony/TerminatorHostWatch which does this 
 
 ## Docker/Podman API Integration
 
-When the `docker` Python SDK is installed (`pip install docker`), the plugin
-can use the Docker/Podman API for enhanced container support:
+The plugin talks to the Docker/Podman API directly over its unix socket using
+only the Python standard library — no `docker` SDK or extra dependencies are
+required. When an API socket is available it provides enhanced container support:
 
-- **Container working directory**: Automatically detected via `docker inspect`,
-  so `cd` is more reliable for containers
+- **Container working directory**: Automatically detected via the `/inspect`
+  endpoint, so `cd` is more reliable for containers
 - **`--workdir` on clone**: Container clones use `docker exec -w /path` instead
   of sending a `cd` command after spawning
 
@@ -73,8 +74,8 @@ The plugin tries these API sockets in order:
 4. Docker: `unix:///var/run/docker.sock`
 5. System Podman: `unix:///run/podman/podman.sock`
 
-If the SDK is not installed or no socket is available, the plugin falls back
-to the existing psutil-based cmdline parsing — no functionality is lost.
+If no socket is available, the plugin falls back to the existing psutil-based
+cmdline parsing — no functionality is lost.
 
 **Podman users**: Enable the API socket with:
 ```shell
@@ -85,9 +86,6 @@ systemctl --user start podman.socket
 ```shell
 mkdir -p ~/.config/terminator/plugins
 cp remote.py ~/.config/terminator/plugins/
-
-# Optional: install Docker SDK for enhanced container support
-pip install docker
 ```
 
 Start Terminator. In Right Click -> Preferences -> Plugins, enable Remote
