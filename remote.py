@@ -360,7 +360,7 @@ class SSHSession(RemoteSession):
             without a -t/--force-tty flag
         """
         try:
-            # Parent process check — rsync/scp/sftp all spawn ssh as a child
+            # Parent process check — rsync/scp/sftp all spawn ssh as a hild
             parent = proc.parent()
             if parent is not None:
                 pname = parent.name()
@@ -380,6 +380,12 @@ class SSHSession(RemoteSession):
             has_tty = any(o == '-t' for o, _ in opts)
             if not has_tty and len(args) > 1:
                 dbg(f"ssh proc {proc.pid} has remote command without -t, treating as transport")
+                return True
+            # -W host:port is direct stream forwarding — a non-interactive transport
+            # used by git's ProxyCommand (e.g. `ssh -W [gitlab]:22 gw`). It forwards
+            # stdio to a port and never allocates a PTY, so it is never a session.
+            if any(o == '-W' for o, _ in opts):
+                dbg(f"ssh proc {proc.pid} is using -W stream forwarding, treating as transport")
                 return True
         except psutil.NoSuchProcess:
             dbg("proc has gone away during transport check")
